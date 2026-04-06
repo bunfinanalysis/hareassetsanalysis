@@ -164,7 +164,7 @@ function DashboardContent() {
         source={snapshot?.source}
       />
 
-      <main className="relative z-10 mx-auto flex w-full max-w-[1700px] flex-1 flex-col gap-4 px-4 py-4 lg:px-5">
+      <main className="relative z-10 mx-auto flex w-full max-w-[1760px] flex-1 flex-col gap-4 px-4 py-4 lg:px-5">
         {snapshot?.warning ? (
           <div className="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/8 px-4 py-3 text-sm text-amber-100">
             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
@@ -172,11 +172,11 @@ function DashboardContent() {
           </div>
         ) : null}
 
-        <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <Card className="flex min-h-[68vh] flex-col overflow-hidden xl:h-[82vh] xl:min-h-0 xl:max-h-[860px]">
+        <div className="grid flex-1 gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <Card className="flex min-h-[72vh] flex-col overflow-hidden xl:h-[86vh] xl:min-h-0 xl:max-h-[960px]">
             <CardHeader className="border-b border-white/6 px-4 py-3 sm:px-5">
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px] xl:items-start">
-                <div className="space-y-3">
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start">
+                <div className="space-y-2.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge className="bg-primary/12 text-primary hover:bg-primary/12">
                       <CandlestickChart className="mr-1.5 h-3.5 w-3.5" />
@@ -246,15 +246,15 @@ function DashboardContent() {
                   </div>
                 </div>
 
-                <div className="w-full xl:w-auto xl:min-w-[300px]">
-                  <div className="rounded-[20px] border border-white/8 bg-white/4 p-3">
+                <div className="w-full xl:w-auto xl:min-w-[280px]">
+                  <div className="rounded-[20px] border border-white/8 bg-white/4 p-2.5">
                     <div className="flex items-center gap-2">
                       <Waves className="h-4 w-4 text-primary" />
                       <p className="text-sm font-medium text-foreground">
                         Timeframe Controls
                       </p>
                     </div>
-                    <div className="mt-3">
+                    <div className="mt-2.5">
                       <TimeframeSwitcher />
                     </div>
                   </div>
@@ -262,7 +262,7 @@ function DashboardContent() {
               </div>
             </CardHeader>
 
-            <CardContent className="flex min-h-0 flex-1 flex-col p-3 pt-3 sm:p-4">
+            <CardContent className="flex min-h-0 flex-1 flex-col p-2.5 pt-2.5 sm:p-3">
               <MetalChart
                 candles={snapshot?.candles ?? []}
                 isLoading={isLoading}
@@ -282,7 +282,7 @@ function DashboardContent() {
           </Card>
 
           <WaveAnalysisPanel
-            className="min-h-[68vh] xl:h-[82vh] xl:min-h-0 xl:max-h-[860px]"
+            className="min-h-[72vh] xl:h-[86vh] xl:min-h-0 xl:max-h-[960px]"
             waveAnalysis={waveAnalysis}
             wavePoints={wavePoints}
             alternateCount={alternateCount}

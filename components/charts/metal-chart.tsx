@@ -80,6 +80,11 @@ type OverlayGeometry = {
   height: number;
   impulsePoints: OverlayWavePoint[];
   correctivePoints: OverlayWavePoint[];
+  resistanceZones: OverlayResistanceZone[];
+  draftResistanceZone: OverlayResistanceZone | null;
+  userLines: OverlayUserDrawnLine[];
+  pendingLineAnchor: OverlayPendingLineAnchor | null;
+  pendingResistanceZoneAnchor: OverlayPendingResistanceZoneAnchor | null;
   fibonacciLevels: Array<FibonacciLevel & { y: number }>;
   probabilityZones: OverlayProbabilityZone[];
   correctivePrediction: OverlayCorrectivePrediction | null;
@@ -145,6 +150,76 @@ type OverlayCorrectivePrediction = CorrectivePredictionTarget & {
   targetY: number;
 };
 
+type UserDrawnLine = {
+  id: string;
+  startTime: number;
+  startPrice: number;
+  endTime: number;
+  endPrice: number;
+};
+
+type OverlayUserDrawnLine = UserDrawnLine & {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
+
+type PendingLineAnchor = {
+  time: number;
+  price: number;
+};
+
+type OverlayPendingLineAnchor = PendingLineAnchor & {
+  x: number;
+  y: number;
+};
+
+type ResistanceZone = {
+  id: string;
+  topPrice: number;
+  bottomPrice: number;
+};
+
+type OverlayResistanceZone = ResistanceZone & {
+  topY: number;
+  bottomY: number;
+  centerY: number;
+  percentLabel: string;
+};
+
+type OverlayPendingResistanceZoneAnchor = {
+  price: number;
+  y: number;
+};
+
+type ResistanceZoneInteraction =
+  | {
+      type: "create";
+      anchorPrice: number;
+      fromPendingAnchor: boolean;
+      moved: boolean;
+    }
+  | {
+      type: "move";
+      zoneId: string;
+      startTopPrice: number;
+      startBottomPrice: number;
+      pointerStartPrice: number;
+    }
+  | {
+      type: "resize-top";
+      zoneId: string;
+      startTopPrice: number;
+      startBottomPrice: number;
+    }
+  | {
+      type: "resize-bottom";
+      zoneId: string;
+      startTopPrice: number;
+      startBottomPrice: number;
+    };
+
 type RetracementBarrierLevel = {
   id: string;
   ratio: number;
@@ -179,6 +254,9 @@ type OverlayPriceExtents = {
 
 const IMPULSE_COLOR = "#3b82f6";
 const CORRECTIVE_COLOR = "#f59e0b";
+const DRAW_LINE_COLOR = "#a855f7";
+const RESISTANCE_ZONE_FILL = "rgba(249, 115, 22, 0.18)";
+const RESISTANCE_ZONE_STROKE = "rgba(251, 146, 60, 0.72)";
 const FIB_LINE_COLOR = "rgba(216, 168, 77, 0.6)";
 const LABEL_BACKGROUND_FILL = "rgba(6, 17, 31, 0.9)";
 const LABEL_BACKGROUND_STROKE = "rgba(255, 255, 255, 0.08)";
@@ -187,6 +265,11 @@ const EMPTY_OVERLAY: OverlayGeometry = {
   height: 0,
   impulsePoints: [],
   correctivePoints: [],
+  resistanceZones: [],
+  draftResistanceZone: null,
+  userLines: [],
+  pendingLineAnchor: null,
+  pendingResistanceZoneAnchor: null,
   fibonacciLevels: [],
   probabilityZones: [],
   correctivePrediction: null,
@@ -679,6 +762,20 @@ function formatOverlayPrice(price: number) {
   return price.toFixed(decimals);
 }
 
+function normalizeResistanceZonePrices(topPrice: number, bottomPrice: number) {
+  return {
+    topPrice: Math.max(topPrice, bottomPrice),
+    bottomPrice: Math.min(topPrice, bottomPrice),
+  };
+}
+
+function formatResistanceZonePercent(topPrice: number, bottomPrice: number) {
+  void topPrice;
+  void bottomPrice;
+
+  return "Resistance";
+}
+
 function truncateOverlayText(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
 }
@@ -791,6 +888,9 @@ function buildOverlayPriceExtents(
   wavePoints: WavePoint[],
   probabilityZoneTargets: ProbabilityZoneTarget[],
   correctivePredictionTarget: CorrectivePredictionTarget | null,
+  resistanceZones: ResistanceZone[],
+  draftResistanceZone: ResistanceZone | null,
+  pendingResistanceZoneAnchor: number | null,
   retracementBarrierTarget: RetracementBarrierTarget | null,
   validations: Array<ReturnType<typeof validateWaveCount> | null>,
 ): OverlayPriceExtents | null {
@@ -807,6 +907,13 @@ function buildOverlayPriceExtents(
             ? [correctivePredictionTarget.invalidationLevel]
             : []),
         ]
+      : []),
+    ...resistanceZones.flatMap((zone) => [zone.topPrice, zone.bottomPrice]),
+    ...(draftResistanceZone
+      ? [draftResistanceZone.topPrice, draftResistanceZone.bottomPrice]
+      : []),
+    ...(typeof pendingResistanceZoneAnchor === "number"
+      ? [pendingResistanceZoneAnchor]
       : []),
     ...(retracementBarrierTarget
       ? [
@@ -1022,7 +1129,12 @@ function buildOverlayGeometry(
   analysis: WaveAnalysis,
   probabilityZoneTargets: ProbabilityZoneTarget[],
   correctivePredictionTarget: CorrectivePredictionTarget | null,
+  resistanceZones: ResistanceZone[],
+  draftResistanceZone: ResistanceZone | null,
+  pendingResistanceZoneAnchor: number | null,
   retracementBarrierTarget: RetracementBarrierTarget | null,
+  drawnLines: UserDrawnLine[],
+  pendingLineAnchor: PendingLineAnchor | null,
 ) {
   const chartHeight = container.clientHeight;
   const impulseDirection = inferDirectionFromSequence(analysis.impulsePoints);
@@ -1045,6 +1157,32 @@ function buildOverlayGeometry(
     CORRECTIVE_COLOR,
     chartHeight,
   );
+  const toOverlayResistanceZone = (zone: ResistanceZone) => {
+    const upperCoordinate = series.priceToCoordinate(zone.topPrice);
+    const lowerCoordinate = series.priceToCoordinate(zone.bottomPrice);
+
+    if (upperCoordinate === null || lowerCoordinate === null) {
+      return null;
+    }
+
+    const topY = Math.min(Number(upperCoordinate), Number(lowerCoordinate));
+    const bottomY = Math.max(Number(upperCoordinate), Number(lowerCoordinate));
+    const centerY = (topY + bottomY) / 2;
+
+    return {
+      ...zone,
+      topY,
+      bottomY,
+      centerY,
+      percentLabel: formatResistanceZonePercent(zone.topPrice, zone.bottomPrice),
+    } satisfies OverlayResistanceZone;
+  };
+  const overlayResistanceZones = resistanceZones
+    .map<OverlayResistanceZone | null>((zone) => toOverlayResistanceZone(zone))
+    .filter((zone): zone is OverlayResistanceZone => zone !== null);
+  const overlayDraftResistanceZone = draftResistanceZone
+    ? toOverlayResistanceZone(draftResistanceZone)
+    : null;
   const fibonacciLevels = selectRelevantFibonacciLevels(
     (analysis.validation?.fibonacciLevels ?? [])
     .map((level) => {
@@ -1061,6 +1199,60 @@ function buildOverlayGeometry(
     })
     .filter((level): level is FibonacciLevel & { y: number } => level !== null),
   );
+  const userLines = drawnLines
+    .map<OverlayUserDrawnLine | null>((line) => {
+      const x1 = chart.timeScale().timeToCoordinate(line.startTime as UTCTimestamp);
+      const y1 = series.priceToCoordinate(line.startPrice);
+      const x2 = chart.timeScale().timeToCoordinate(line.endTime as UTCTimestamp);
+      const y2 = series.priceToCoordinate(line.endPrice);
+
+      if (x1 === null || y1 === null || x2 === null || y2 === null) {
+        return null;
+      }
+
+      return {
+        ...line,
+        x1: Number(x1),
+        y1: Number(y1),
+        x2: Number(x2),
+        y2: Number(y2),
+      };
+    })
+    .filter((line): line is OverlayUserDrawnLine => line !== null);
+  const overlayPendingLineAnchor = (() => {
+    if (!pendingLineAnchor) {
+      return null;
+    }
+
+    const x = chart.timeScale().timeToCoordinate(pendingLineAnchor.time as UTCTimestamp);
+    const y = series.priceToCoordinate(pendingLineAnchor.price);
+
+    if (x === null || y === null) {
+      return null;
+    }
+
+    return {
+      ...pendingLineAnchor,
+      x: Number(x),
+      y: Number(y),
+    };
+  })();
+  const overlayPendingResistanceZoneAnchor = (() => {
+    if (typeof pendingResistanceZoneAnchor !== "number") {
+      return null;
+    }
+
+    const y = series.priceToCoordinate(pendingResistanceZoneAnchor);
+
+    if (y === null) {
+      return null;
+    }
+
+    return {
+      price: pendingResistanceZoneAnchor,
+      y: Number(y),
+    } satisfies OverlayPendingResistanceZoneAnchor;
+  })();
   const probabilityZones = probabilityZoneTargets
     .map<OverlayProbabilityZone | null>((probabilityZoneTarget) => {
       const upperCoordinate = series.priceToCoordinate(probabilityZoneTarget.priceHigh);
@@ -1181,6 +1373,11 @@ function buildOverlayGeometry(
     height: container.clientHeight,
     impulsePoints,
     correctivePoints,
+    resistanceZones: overlayResistanceZones,
+    draftResistanceZone: overlayDraftResistanceZone,
+    userLines,
+    pendingLineAnchor: overlayPendingLineAnchor,
+    pendingResistanceZoneAnchor: overlayPendingResistanceZoneAnchor,
     fibonacciLevels,
     probabilityZones,
     correctivePrediction,
@@ -1204,6 +1401,35 @@ function buildGeometryFingerprint(geometry: OverlayGeometry) {
       Math.round(point.x),
       Math.round(point.y),
     ]),
+    resistanceZones: geometry.resistanceZones.map((zone) => [
+      zone.id,
+      Math.round(zone.topY),
+      Math.round(zone.bottomY),
+      zone.percentLabel,
+    ]),
+    draftResistanceZone: geometry.draftResistanceZone
+      ? [
+          geometry.draftResistanceZone.id,
+          Math.round(geometry.draftResistanceZone.topY),
+          Math.round(geometry.draftResistanceZone.bottomY),
+        ]
+      : null,
+    userLines: geometry.userLines.map((line) => [
+      line.id,
+      Math.round(line.x1),
+      Math.round(line.y1),
+      Math.round(line.x2),
+      Math.round(line.y2),
+    ]),
+    pendingLineAnchor: geometry.pendingLineAnchor
+      ? [
+          Math.round(geometry.pendingLineAnchor.x),
+          Math.round(geometry.pendingLineAnchor.y),
+        ]
+      : null,
+    pendingResistanceZoneAnchor: geometry.pendingResistanceZoneAnchor
+      ? [Math.round(geometry.pendingResistanceZoneAnchor.y)]
+      : null,
     fibs: geometry.fibonacciLevels.map((level) => [
       level.id,
       level.label,
@@ -1321,6 +1547,52 @@ function buildWaveAnalysisSignature(analysis: WaveAnalysis) {
   });
 }
 
+function getTimeScaleDisplayConfig(timeframeLabel: string) {
+  if (timeframeLabel === "1m") {
+    return {
+      barSpacing: 7.2,
+      minBarSpacing: 4.8,
+      rightOffset: 4,
+      visibleBars: 150,
+    };
+  }
+
+  if (timeframeLabel === "5m") {
+    return {
+      barSpacing: 8.2,
+      minBarSpacing: 5.2,
+      rightOffset: 4,
+      visibleBars: 140,
+    };
+  }
+
+  return {
+    barSpacing: 11,
+    minBarSpacing: 6,
+    rightOffset: 10,
+    visibleBars: null as number | null,
+  };
+}
+
+function applyPreferredTimeScaleWindow(
+  chart: IChartApi,
+  candleCount: number,
+  timeframeLabel: string,
+) {
+  const { visibleBars, rightOffset } = getTimeScaleDisplayConfig(timeframeLabel);
+
+  if (!visibleBars || candleCount <= 0) {
+    chart.timeScale().fitContent();
+    return;
+  }
+
+  const visibleCount = Math.min(visibleBars, candleCount);
+  const to = candleCount - 1 + rightOffset;
+  const from = Math.max(-0.5, candleCount - visibleCount - 0.5);
+
+  chart.timeScale().setVisibleLogicalRange({ from, to });
+}
+
 function buildAutoDetectedWavePoints(detection: ReturnType<typeof autoDetectWaveCount>) {
   const detectedCounts = [detection.impulseCount, detection.correctiveCount].filter(
     (count): count is WaveCount => count !== null,
@@ -1386,6 +1658,7 @@ export function MetalChart({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const lastResetKeyRef = useRef<string | null>(null);
   const dragPointIdRef = useRef<string | null>(null);
+  const resistanceZoneInteractionRef = useRef<ResistanceZoneInteraction | null>(null);
   const overlayAnimationFrameRef = useRef<number | null>(null);
   const overlayFingerprintRef = useRef<string>("");
   const candlesRef = useRef(candles);
@@ -1393,11 +1666,19 @@ export function MetalChart({
   const [internalInteractionMode, setInternalInteractionMode] = useState<InteractionMode>("manual");
   const [manualWaveMode, setManualWaveMode] = useState<ManualWaveMode>("impulse");
   const [showCorrectivePrediction, setShowCorrectivePrediction] = useState(false);
+  const [isDrawLineMode, setIsDrawLineMode] = useState(false);
+  const [isResistanceMode, setIsResistanceMode] = useState(false);
+  const [resistanceZones, setResistanceZones] = useState<ResistanceZone[]>([]);
+  const [draftResistanceZone, setDraftResistanceZone] = useState<ResistanceZone | null>(null);
+  const [pendingResistanceZoneAnchor, setPendingResistanceZoneAnchor] = useState<number | null>(null);
+  const [drawnLines, setDrawnLines] = useState<UserDrawnLine[]>([]);
+  const [pendingLineAnchor, setPendingLineAnchor] = useState<PendingLineAnchor | null>(null);
   const [internalWavePoints, setInternalWavePoints] = useState<WavePoint[]>([]);
   const [alternateWaveCount, setAlternateWaveCount] = useState<WaveCount | null>(null);
   const [alternateWaveValidation, setAlternateWaveValidation] =
     useState<ReturnType<typeof validateWaveCount> | null>(null);
   const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
+  const [activeResistanceZoneId, setActiveResistanceZoneId] = useState<string | null>(null);
   const [overlayGeometry, setOverlayGeometry] = useState<OverlayGeometry>(EMPTY_OVERLAY);
   const interactionMode = controlledInteractionMode ?? internalInteractionMode;
   const wavePoints = controlledWavePoints ?? internalWavePoints;
@@ -1407,6 +1688,17 @@ export function MetalChart({
   const onInteractionModeChangeRef = useRef(onInteractionModeChange);
   const onWaveAnalysisChangeRef = useRef(onWaveAnalysisChange);
   const onAlternateCountChangeRef = useRef(onAlternateCountChange);
+  const updateInteractionModeActionRef = useRef<((mode: InteractionMode) => void) | null>(null);
+  const updateWavePointsActionRef = useRef<
+    ((
+      next: WavePoint[] | ((currentWavePoints: WavePoint[]) => WavePoint[]),
+    ) => void) | null
+  >(null);
+  const resetAlternateCountRef = useRef<(() => void) | null>(null);
+  const stopDraggingRef = useRef<(() => void) | null>(null);
+  const stopResistanceZoneInteractionRef = useRef<
+    ((event?: PointerEvent) => void) | null
+  >(null);
   const handleChartClickRef = useRef<
     ((param: MouseEventParams<Time>) => void) | null
   >(null);
@@ -1488,6 +1780,18 @@ export function MetalChart({
     setAlternateWaveValidation(null);
     publishAlternateCount(null, null);
   }, [publishAlternateCount]);
+
+  useEffect(() => {
+    updateInteractionModeActionRef.current = updateInteractionMode;
+  }, [updateInteractionMode]);
+
+  useEffect(() => {
+    updateWavePointsActionRef.current = updateWavePoints;
+  }, [updateWavePoints]);
+
+  useEffect(() => {
+    resetAlternateCountRef.current = resetAlternateCount;
+  }, [resetAlternateCount]);
 
   const waveAnalysis = useMemo(
     () => buildWaveAnalysis(wavePoints, candles, interactionMode),
@@ -1616,6 +1920,9 @@ export function MetalChart({
         wavePoints,
         probabilityZoneTargets,
         correctivePredictionTarget,
+        resistanceZones,
+        draftResistanceZone,
+        pendingResistanceZoneAnchor,
         retracementBarrierTarget,
         [
           waveAnalysis.validation,
@@ -1627,7 +1934,10 @@ export function MetalChart({
     [
       alternateWaveValidation,
       correctivePredictionTarget,
+      draftResistanceZone,
+      pendingResistanceZoneAnchor,
       probabilityZoneTargets,
+      resistanceZones,
       retracementBarrierTarget,
       waveAnalysis.correctiveValidation,
       waveAnalysis.impulseValidation,
@@ -1670,7 +1980,172 @@ export function MetalChart({
     [],
   );
 
+  const handleResistanceZonePointerMove = useCallback(
+    (event: PointerEvent) => {
+      if (!containerRef.current || !resistanceZoneInteractionRef.current) {
+        return;
+      }
+
+      const bounds = containerRef.current.getBoundingClientRect();
+      const localX = event.clientX - bounds.left;
+      const localY = event.clientY - bounds.top;
+      const nextPoint = projectInteractionPoint(localX, localY);
+
+      if (!nextPoint) {
+        return;
+      }
+
+      const interaction = resistanceZoneInteractionRef.current;
+      const minimumZoneSpan = METAL_SYMBOLS[symbol].minMove * 12;
+
+      if (interaction.type === "create") {
+        resistanceZoneInteractionRef.current = {
+          ...interaction,
+          moved: true,
+        };
+        setDraftResistanceZone({
+          id: "resistance-zone-draft",
+          ...normalizeResistanceZonePrices(interaction.anchorPrice, nextPoint.price),
+        });
+        return;
+      }
+
+      setResistanceZones((currentZones) =>
+        currentZones.map((zone) => {
+          if (zone.id !== interaction.zoneId) {
+            return zone;
+          }
+
+          if (interaction.type === "move") {
+            const deltaPrice = nextPoint.price - interaction.pointerStartPrice;
+
+            return {
+              ...zone,
+              ...normalizeResistanceZonePrices(
+                interaction.startTopPrice + deltaPrice,
+                interaction.startBottomPrice + deltaPrice,
+              ),
+            };
+          }
+
+          if (interaction.type === "resize-top") {
+            const nextTopPrice = Math.max(
+              nextPoint.price,
+              interaction.startBottomPrice + minimumZoneSpan,
+            );
+
+            return {
+              ...zone,
+              ...normalizeResistanceZonePrices(nextTopPrice, interaction.startBottomPrice),
+            };
+          }
+
+          const nextBottomPrice = Math.min(
+            nextPoint.price,
+            interaction.startTopPrice - minimumZoneSpan,
+          );
+
+          return {
+            ...zone,
+            ...normalizeResistanceZonePrices(interaction.startTopPrice, nextBottomPrice),
+          };
+        }),
+      );
+    },
+    [projectInteractionPoint, symbol],
+  );
+
+  const stopResistanceZoneInteraction = useCallback(
+    (event?: PointerEvent) => {
+      const interaction = resistanceZoneInteractionRef.current;
+
+      if (interaction?.type === "create") {
+        const minimumZoneSpan = METAL_SYMBOLS[symbol].minMove * 12;
+        let currentPointPrice: number | null = null;
+
+        if (event && containerRef.current) {
+          const bounds = containerRef.current.getBoundingClientRect();
+          const localX = event.clientX - bounds.left;
+          const localY = event.clientY - bounds.top;
+          const currentPoint = projectInteractionPoint(localX, localY);
+          currentPointPrice = currentPoint?.price ?? null;
+        }
+
+        const hasMeaningfulReleaseDrag =
+          typeof currentPointPrice === "number" &&
+          Math.abs(currentPointPrice - interaction.anchorPrice) >= minimumZoneSpan / 4;
+
+        if (!interaction.fromPendingAnchor && !interaction.moved && !hasMeaningfulReleaseDrag) {
+          setPendingResistanceZoneAnchor(interaction.anchorPrice);
+          setDraftResistanceZone(null);
+        } else {
+          const endPrice =
+            currentPointPrice ??
+            draftResistanceZone?.bottomPrice ??
+            interaction.anchorPrice;
+          const normalizedZone = normalizeResistanceZonePrices(
+            interaction.anchorPrice,
+            endPrice,
+          );
+
+          if (normalizedZone.topPrice - normalizedZone.bottomPrice >= minimumZoneSpan / 2) {
+            setResistanceZones((currentZones) => [
+              ...currentZones,
+              {
+                id: `resistance-zone-${Date.now()}-${Math.round(Math.random() * 100000)}`,
+                ...normalizedZone,
+              },
+            ]);
+          } else if (!interaction.fromPendingAnchor) {
+            setPendingResistanceZoneAnchor(interaction.anchorPrice);
+          }
+
+          setDraftResistanceZone(null);
+        }
+      }
+
+      resistanceZoneInteractionRef.current = null;
+      setActiveResistanceZoneId(null);
+      window.removeEventListener("pointermove", handleResistanceZonePointerMove);
+      window.removeEventListener("pointerup", stopResistanceZoneInteraction);
+    },
+    [draftResistanceZone, handleResistanceZonePointerMove, projectInteractionPoint, symbol],
+  );
+
+  const handleResistanceOverlayPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (resistanceZoneInteractionRef.current?.type !== "create") {
+        return;
+      }
+
+      event.preventDefault();
+      handleResistanceZonePointerMove(event.nativeEvent);
+    },
+    [handleResistanceZonePointerMove],
+  );
+
+  const handleResistanceOverlayPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (resistanceZoneInteractionRef.current?.type !== "create") {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      stopResistanceZoneInteraction(event.nativeEvent);
+    },
+    [stopResistanceZoneInteraction],
+  );
+
   const handleAutoDetectWaves = useCallback(() => {
+    if (resistanceZoneInteractionRef.current) {
+      stopResistanceZoneInteraction();
+    }
+
     const detection = autoDetectWaveCount(candlesRef.current, {
       degree: "minor",
       pattern: "either",
@@ -1684,6 +2159,9 @@ export function MetalChart({
 
     updateInteractionMode("auto");
     setShowCorrectivePrediction(false);
+    setIsResistanceMode(false);
+    setDraftResistanceZone(null);
+    setPendingResistanceZoneAnchor(null);
     updateWavePoints(nextWavePoints);
 
     const companionCandidate = pickCompanionDetectedCandidate(detection);
@@ -1691,20 +2169,42 @@ export function MetalChart({
     setAlternateWaveCount(companionCandidate.count);
     setAlternateWaveValidation(companionCandidate.validation);
     publishAlternateCount(companionCandidate.count, companionCandidate.validation);
-  }, [publishAlternateCount, updateInteractionMode, updateWavePoints]);
+  }, [
+    publishAlternateCount,
+    stopResistanceZoneInteraction,
+    updateInteractionMode,
+    updateWavePoints,
+  ]);
 
   const handleClearWaves = useCallback(() => {
+    if (resistanceZoneInteractionRef.current) {
+      stopResistanceZoneInteraction();
+    }
+
     updateWavePoints([]);
     updateInteractionMode("manual");
     setShowCorrectivePrediction(false);
+    setIsResistanceMode(false);
+    setDraftResistanceZone(null);
+    setPendingResistanceZoneAnchor(null);
     setDraggingPointId(null);
     dragPointIdRef.current = null;
     resetAlternateCount();
-  }, [resetAlternateCount, updateInteractionMode, updateWavePoints]);
+  }, [
+    resetAlternateCount,
+    stopResistanceZoneInteraction,
+    updateInteractionMode,
+    updateWavePoints,
+  ]);
 
   const handleChartClick = useCallback(
     (param: MouseEventParams<Time>) => {
-      if (interactionModeRef.current !== "manual" || dragPointIdRef.current) {
+      if (
+        interactionModeRef.current !== "manual" ||
+        dragPointIdRef.current ||
+        resistanceZoneInteractionRef.current ||
+        isResistanceMode
+      ) {
         return;
       }
 
@@ -1715,6 +2215,31 @@ export function MetalChart({
       const nextPoint = projectInteractionPoint(param.point.x, param.point.y);
 
       if (!nextPoint) {
+        return;
+      }
+
+      if (isDrawLineMode) {
+        if (!pendingLineAnchor) {
+          setPendingLineAnchor({
+            time: nextPoint.time,
+            price: nextPoint.price,
+          });
+
+          return;
+        }
+
+        setDrawnLines((currentLines) => [
+          ...currentLines,
+          {
+            id: `drawn-line-${Date.now()}-${Math.round(Math.random() * 100000)}`,
+            startTime: pendingLineAnchor.time,
+            startPrice: pendingLineAnchor.price,
+            endTime: nextPoint.time,
+            endPrice: nextPoint.price,
+          },
+        ]);
+        setPendingLineAnchor(null);
+
         return;
       }
 
@@ -1750,7 +2275,15 @@ export function MetalChart({
         ]);
       });
     },
-    [manualWaveMode, projectInteractionPoint, resetAlternateCount, updateWavePoints],
+    [
+      isDrawLineMode,
+      isResistanceMode,
+      manualWaveMode,
+      pendingLineAnchor,
+      projectInteractionPoint,
+      resetAlternateCount,
+      updateWavePoints,
+    ],
   );
 
   useEffect(() => {
@@ -1760,6 +2293,49 @@ export function MetalChart({
   const handleChartClickProxy = useCallback((param: MouseEventParams<Time>) => {
     handleChartClickRef.current?.(param);
   }, []);
+
+  const handleResistanceOverlayPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!isResistanceMode) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const localX = event.clientX - bounds.left;
+      const localY = event.clientY - bounds.top;
+      const nextPoint = projectInteractionPoint(localX, localY);
+
+      if (!nextPoint) {
+        return;
+      }
+
+      const anchorPrice = pendingResistanceZoneAnchor ?? nextPoint.price;
+      const fromPendingAnchor = pendingResistanceZoneAnchor !== null;
+
+      event.currentTarget.setPointerCapture(event.pointerId);
+
+      resistanceZoneInteractionRef.current = {
+        type: "create",
+        anchorPrice,
+        fromPendingAnchor,
+        moved: false,
+      };
+
+      setPendingResistanceZoneAnchor(null);
+      setDraftResistanceZone({
+        id: "resistance-zone-draft",
+        ...normalizeResistanceZonePrices(anchorPrice, nextPoint.price),
+      });
+    },
+    [
+      isResistanceMode,
+      pendingResistanceZoneAnchor,
+      projectInteractionPoint,
+    ],
+  );
 
   const handlePointerMove = useCallback(
     (event: PointerEvent) => {
@@ -1801,9 +2377,17 @@ export function MetalChart({
     window.removeEventListener("pointerup", stopDragging);
   }, [handlePointerMove]);
 
+  useEffect(() => {
+    stopDraggingRef.current = stopDragging;
+  }, [stopDragging]);
+
   const startDraggingPoint = useCallback(
     (pointId: string) => (event: React.PointerEvent<SVGCircleElement>) => {
-      if (interactionModeRef.current !== "manual") {
+      if (
+        interactionModeRef.current !== "manual" ||
+        isDrawLineMode ||
+        isResistanceMode
+      ) {
         return;
       }
 
@@ -1814,18 +2398,87 @@ export function MetalChart({
       window.addEventListener("pointermove", handlePointerMove);
       window.addEventListener("pointerup", stopDragging);
     },
-    [handlePointerMove, stopDragging],
+    [handlePointerMove, isDrawLineMode, isResistanceMode, stopDragging],
+  );
+
+  const startResistanceZoneInteraction = useCallback(
+    (zoneId: string, interactionType: "move" | "resize-top" | "resize-bottom") =>
+      (event: React.PointerEvent<SVGRectElement | SVGLineElement>) => {
+        if (!containerRef.current) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const bounds = containerRef.current.getBoundingClientRect();
+        const localX = event.clientX - bounds.left;
+        const localY = event.clientY - bounds.top;
+        const nextPoint = projectInteractionPoint(localX, localY);
+        const resistanceZone = resistanceZones.find((zone) => zone.id === zoneId);
+
+        if (!nextPoint || !resistanceZone) {
+          return;
+        }
+
+        resistanceZoneInteractionRef.current =
+          interactionType === "move"
+            ? {
+                type: "move",
+                zoneId,
+                startTopPrice: resistanceZone.topPrice,
+                startBottomPrice: resistanceZone.bottomPrice,
+                pointerStartPrice: nextPoint.price,
+              }
+            : interactionType === "resize-top"
+              ? {
+                  type: "resize-top",
+                  zoneId,
+                  startTopPrice: resistanceZone.topPrice,
+                  startBottomPrice: resistanceZone.bottomPrice,
+                }
+              : {
+                  type: "resize-bottom",
+                  zoneId,
+                  startTopPrice: resistanceZone.topPrice,
+                  startBottomPrice: resistanceZone.bottomPrice,
+                };
+
+        setActiveResistanceZoneId(zoneId);
+        window.addEventListener("pointermove", handleResistanceZonePointerMove);
+        window.addEventListener("pointerup", stopResistanceZoneInteraction);
+      },
+    [
+      handleResistanceZonePointerMove,
+      projectInteractionPoint,
+      resistanceZones,
+      stopResistanceZoneInteraction,
+    ],
   );
 
   useEffect(() => {
-    updateWavePoints([]);
-    setOverlayGeometry(EMPTY_OVERLAY);
-    updateInteractionMode("manual");
-    setShowCorrectivePrediction(false);
-    resetAlternateCount();
+    stopResistanceZoneInteractionRef.current = stopResistanceZoneInteraction;
+  }, [stopResistanceZoneInteraction]);
+
+  useEffect(() => {
     dragPointIdRef.current = null;
+    resistanceZoneInteractionRef.current = null;
+    stopDraggingRef.current?.();
+    stopResistanceZoneInteractionRef.current?.();
+    updateWavePointsActionRef.current?.([]);
+    setOverlayGeometry(EMPTY_OVERLAY);
+    updateInteractionModeActionRef.current?.("manual");
+    setShowCorrectivePrediction(false);
+    setIsDrawLineMode(false);
+    setIsResistanceMode(false);
+    setDrawnLines([]);
+    setPendingLineAnchor(null);
+    setDraftResistanceZone(null);
+    setPendingResistanceZoneAnchor(null);
+    resetAlternateCountRef.current?.();
     setDraggingPointId(null);
-  }, [resetAlternateCount, symbol, timeframeLabel, updateInteractionMode, updateWavePoints]);
+    setActiveResistanceZoneId(null);
+  }, [symbol, timeframeLabel]);
 
   useEffect(() => {
     if (
@@ -1979,10 +2632,28 @@ export function MetalChart({
     const resetKey = `${symbol}-${timeframeLabel}`;
 
     if (lastResetKeyRef.current !== resetKey) {
-      chartRef.current?.timeScale().fitContent();
+      if (chartRef.current) {
+        applyPreferredTimeScaleWindow(chartRef.current, candleData.length, timeframeLabel);
+      }
       lastResetKeyRef.current = resetKey;
     }
   }, [candles, symbol, timeframeLabel]);
+
+  useEffect(() => {
+    if (!chartRef.current) {
+      return;
+    }
+
+    const timeScaleDisplayConfig = getTimeScaleDisplayConfig(timeframeLabel);
+
+    chartRef.current.applyOptions({
+      timeScale: {
+        barSpacing: timeScaleDisplayConfig.barSpacing,
+        minBarSpacing: timeScaleDisplayConfig.minBarSpacing,
+        rightOffset: timeScaleDisplayConfig.rightOffset,
+      },
+    });
+  }, [timeframeLabel]);
 
   useEffect(() => {
     if (!candleSeriesRef.current) {
@@ -2038,6 +2709,11 @@ export function MetalChart({
 
     if (
       wavePoints.length === 0 &&
+      resistanceZones.length === 0 &&
+      !draftResistanceZone &&
+      drawnLines.length === 0 &&
+      !pendingLineAnchor &&
+      typeof pendingResistanceZoneAnchor !== "number" &&
       (waveAnalysis.validation?.fibonacciLevels.length ?? 0) === 0 &&
       probabilityZoneTargets.length === 0 &&
       !correctivePredictionTarget &&
@@ -2046,6 +2722,11 @@ export function MetalChart({
       setOverlayGeometry((currentGeometry) =>
         currentGeometry.impulsePoints.length === 0 &&
         currentGeometry.correctivePoints.length === 0 &&
+        currentGeometry.resistanceZones.length === 0 &&
+        currentGeometry.draftResistanceZone === null &&
+        currentGeometry.userLines.length === 0 &&
+        currentGeometry.pendingLineAnchor === null &&
+        currentGeometry.pendingResistanceZoneAnchor === null &&
         currentGeometry.fibonacciLevels.length === 0 &&
         currentGeometry.probabilityZones.length === 0 &&
         currentGeometry.correctivePrediction === null &&
@@ -2070,7 +2751,12 @@ export function MetalChart({
         waveAnalysis,
         probabilityZoneTargets,
         correctivePredictionTarget,
+        resistanceZones,
+        draftResistanceZone,
+        pendingResistanceZoneAnchor,
         retracementBarrierTarget,
+        drawnLines,
+        pendingLineAnchor,
       );
       const nextFingerprint = buildGeometryFingerprint(nextGeometry);
 
@@ -2116,7 +2802,12 @@ export function MetalChart({
     };
   }, [
     correctivePredictionTarget,
+    draftResistanceZone,
+    drawnLines,
+    pendingResistanceZoneAnchor,
+    pendingLineAnchor,
     probabilityZoneTargets,
+    resistanceZones,
     retracementBarrierTarget,
     waveAnalysis,
     wavePoints.length,
@@ -2126,8 +2817,70 @@ export function MetalChart({
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointermove", handleResistanceZonePointerMove);
+      window.removeEventListener("pointerup", stopResistanceZoneInteraction);
     };
-  }, [handlePointerMove, stopDragging]);
+  }, [
+    handlePointerMove,
+    handleResistanceZonePointerMove,
+    stopDragging,
+    stopResistanceZoneInteraction,
+  ]);
+
+  const handleToggleDrawLineMode = useCallback(() => {
+    if (resistanceZoneInteractionRef.current) {
+      stopResistanceZoneInteraction();
+    }
+
+    setIsDrawLineMode((currentValue) => {
+      const nextValue = !currentValue;
+
+      if (!nextValue) {
+        setPendingLineAnchor(null);
+      }
+
+      return nextValue;
+    });
+    setIsResistanceMode(false);
+    setDraftResistanceZone(null);
+    setPendingResistanceZoneAnchor(null);
+  }, [stopResistanceZoneInteraction]);
+
+  const handleDeleteLines = useCallback(() => {
+    setDrawnLines([]);
+    setPendingLineAnchor(null);
+    setIsDrawLineMode(false);
+  }, []);
+
+  const handleToggleResistanceMode = useCallback(() => {
+    if (resistanceZoneInteractionRef.current) {
+      stopResistanceZoneInteraction();
+    }
+
+    setIsResistanceMode((currentValue) => {
+      const nextValue = !currentValue;
+
+      if (!nextValue) {
+        setDraftResistanceZone(null);
+        setPendingResistanceZoneAnchor(null);
+      }
+
+      return nextValue;
+    });
+    setIsDrawLineMode(false);
+    setPendingLineAnchor(null);
+  }, [stopResistanceZoneInteraction]);
+
+  const handleClearResistanceZones = useCallback(() => {
+    setResistanceZones([]);
+    setDraftResistanceZone(null);
+    setPendingResistanceZoneAnchor(null);
+    setIsResistanceMode(false);
+    setActiveResistanceZoneId(null);
+    resistanceZoneInteractionRef.current = null;
+    window.removeEventListener("pointermove", handleResistanceZonePointerMove);
+    window.removeEventListener("pointerup", stopResistanceZoneInteraction);
+  }, [handleResistanceZonePointerMove, stopResistanceZoneInteraction]);
 
   const impulseSegments = useMemo(
     () => buildLineSegments(overlayGeometry.impulsePoints),
@@ -2145,7 +2898,9 @@ export function MetalChart({
         : "No Waves";
 
   return (
-    <div className="relative flex h-full min-h-[460px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0">
+    <div className="relative flex h-full min-h-[540px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-24 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,16,28,0.92),rgba(8,13,24,0.68),rgba(8,13,24,0))]" />
+
       <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 py-2.5">
         <div>
           <p className="text-[11px] uppercase tracking-[0.34em] text-muted-foreground">
@@ -2227,17 +2982,86 @@ export function MetalChart({
         </Button>
       </div>
 
-      <div className="pointer-events-none absolute left-4 top-14 z-20 rounded-xl border border-white/8 bg-[rgba(6,11,21,0.76)] px-3 py-1.5 text-[10px] uppercase tracking-[0.22em] text-muted-foreground shadow-[0_16px_40px_rgba(0,0,0,0.16)] backdrop-blur-xl">
-        {activeWaveLabel} ·{" "}
-        {interactionMode === "manual"
-          ? manualWaveMode === "impulse"
-            ? "Click To Plot 5-Wave"
-            : "Click To Plot 3-Wave"
-          : "Auto Overlay"}
+      <div className="pointer-events-none absolute left-4 top-12 z-20 rounded-xl border border-white/8 bg-[rgba(6,11,21,0.76)] px-3 py-1.5 text-[10px] uppercase tracking-[0.22em] text-muted-foreground shadow-[0_16px_40px_rgba(0,0,0,0.16)] backdrop-blur-xl">
+        {isResistanceMode
+          ? typeof pendingResistanceZoneAnchor === "number"
+            ? "Resistance Tool · Click Or Drag Bottom"
+            : "Resistance Tool · Click Or Drag Zone"
+          : isDrawLineMode
+          ? pendingLineAnchor
+            ? "Line Tool · Click End Point"
+            : "Line Tool · Click Start Point"
+          : `${activeWaveLabel} · ${
+              interactionMode === "manual"
+                ? manualWaveMode === "impulse"
+                  ? "Click To Plot 5-Wave"
+                  : "Click To Plot 3-Wave"
+                : "Auto Overlay"
+            }`}
       </div>
 
-      <div className="absolute inset-x-0 bottom-0 top-12 overflow-hidden">
+      <div className="absolute bottom-3 right-4 z-30 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl">
+        <Button
+          size="sm"
+          variant={isResistanceMode ? "default" : "outline"}
+          className={cn(
+            "h-8 px-3 text-xs",
+            isResistanceMode &&
+              "bg-[rgba(249,115,22,0.18)] border-[rgba(251,146,60,0.35)] text-orange-100 hover:bg-[rgba(249,115,22,0.22)]",
+          )}
+          onClick={handleToggleResistanceMode}
+        >
+          {isResistanceMode ? "Resistance Mode" : "Add Resistance Zone"}
+        </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 px-3 text-xs"
+          disabled={
+            resistanceZones.length === 0 &&
+            !draftResistanceZone &&
+            typeof pendingResistanceZoneAnchor !== "number"
+          }
+          onClick={handleClearResistanceZones}
+        >
+          Clear Resistance Zones
+        </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
+          className={cn(
+            "h-8 px-3 text-xs border-violet-400/25 text-violet-200 hover:bg-violet-500/10 hover:text-violet-100",
+            isDrawLineMode && "bg-violet-500/16 text-violet-100 border-violet-300/40",
+          )}
+          onClick={handleToggleDrawLineMode}
+        >
+          {isDrawLineMode ? "Drawing Lines" : "Draw Lines"}
+        </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 px-3 text-xs"
+          disabled={drawnLines.length === 0 && !pendingLineAnchor}
+          onClick={handleDeleteLines}
+        >
+          Delete Lines
+        </Button>
+      </div>
+
+      <div className="absolute inset-x-0 bottom-14 top-24 overflow-hidden">
         <div ref={containerRef} className="absolute inset-0 h-full w-full min-h-0" />
+        {isResistanceMode ? (
+          <div
+            className="absolute inset-0 z-10 cursor-crosshair touch-none"
+            onPointerDown={handleResistanceOverlayPointerDown}
+            onPointerMove={handleResistanceOverlayPointerMove}
+            onPointerUp={handleResistanceOverlayPointerUp}
+            onPointerCancel={handleResistanceOverlayPointerUp}
+          />
+        ) : null}
 
         {overlayGeometry.width > 0 || overlayGeometry.height > 0 ? (
           <svg
@@ -2247,6 +3071,127 @@ export function MetalChart({
             viewBox={`0 0 ${overlayGeometry.width} ${overlayGeometry.height}`}
             preserveAspectRatio="none"
           >
+          {overlayGeometry.resistanceZones.map((zone) => {
+            const isActive = activeResistanceZoneId === zone.id;
+            const zoneLabelY = zone.centerY + 4;
+
+            return (
+              <g key={zone.id}>
+                <rect
+                  x={10}
+                  y={zone.topY}
+                  width={Math.max(overlayGeometry.width - 20, 0)}
+                  height={Math.max(zone.bottomY - zone.topY, 12)}
+                  rx={8}
+                  fill={RESISTANCE_ZONE_FILL}
+                  stroke={isActive ? "rgba(253, 186, 116, 0.95)" : "rgba(251, 146, 60, 0.26)"}
+                  strokeWidth={isActive ? 1.2 : 1}
+                  className="pointer-events-auto cursor-grab"
+                  onPointerDown={startResistanceZoneInteraction(zone.id, "move")}
+                />
+                <line
+                  x1={10}
+                  y1={zone.topY}
+                  x2={overlayGeometry.width - 10}
+                  y2={zone.topY}
+                  stroke={RESISTANCE_ZONE_STROKE}
+                  strokeWidth={1.2}
+                />
+                <line
+                  x1={10}
+                  y1={zone.bottomY}
+                  x2={overlayGeometry.width - 10}
+                  y2={zone.bottomY}
+                  stroke={RESISTANCE_ZONE_STROKE}
+                  strokeWidth={1.2}
+                />
+                <line
+                  x1={10}
+                  y1={zone.topY}
+                  x2={overlayGeometry.width - 10}
+                  y2={zone.topY}
+                  stroke="transparent"
+                  strokeWidth={10}
+                  className="pointer-events-auto cursor-ns-resize"
+                  onPointerDown={startResistanceZoneInteraction(zone.id, "resize-top")}
+                />
+                <line
+                  x1={10}
+                  y1={zone.bottomY}
+                  x2={overlayGeometry.width - 10}
+                  y2={zone.bottomY}
+                  stroke="transparent"
+                  strokeWidth={10}
+                  className="pointer-events-auto cursor-ns-resize"
+                  onPointerDown={startResistanceZoneInteraction(zone.id, "resize-bottom")}
+                />
+                <rect
+                  x={Math.max(16, overlayGeometry.width / 2 - 38)}
+                  y={Math.max(zone.topY + 6, zone.centerY - 10)}
+                  width={76}
+                  height={20}
+                  rx={10}
+                  fill="rgba(12, 18, 31, 0.88)"
+                  stroke="rgba(251, 146, 60, 0.24)"
+                />
+                <text
+                  x={overlayGeometry.width / 2}
+                  y={zoneLabelY}
+                  fill="#fdba74"
+                  fontSize="9.4"
+                  fontWeight="700"
+                  textAnchor="middle"
+                >
+                  {zone.percentLabel}
+                </text>
+              </g>
+            );
+          })}
+
+          {overlayGeometry.draftResistanceZone ? (
+            <g>
+              <rect
+                x={10}
+                y={overlayGeometry.draftResistanceZone.topY}
+                width={Math.max(overlayGeometry.width - 20, 0)}
+                height={Math.max(
+                  overlayGeometry.draftResistanceZone.bottomY -
+                    overlayGeometry.draftResistanceZone.topY,
+                  10,
+                )}
+                rx={8}
+                fill="rgba(249, 115, 22, 0.14)"
+                stroke="rgba(251, 146, 60, 0.4)"
+                strokeWidth={1}
+                strokeDasharray="4 4"
+              />
+              <text
+                x={overlayGeometry.width / 2}
+                y={overlayGeometry.draftResistanceZone.centerY + 4}
+                fill="#fdba74"
+                fontSize="9.1"
+                fontWeight="700"
+                textAnchor="middle"
+              >
+                {overlayGeometry.draftResistanceZone.percentLabel}
+              </text>
+            </g>
+          ) : null}
+
+          {overlayGeometry.pendingResistanceZoneAnchor ? (
+            <g>
+              <line
+                x1={14}
+                y1={overlayGeometry.pendingResistanceZoneAnchor.y}
+                x2={overlayGeometry.width - 14}
+                y2={overlayGeometry.pendingResistanceZoneAnchor.y}
+                stroke="rgba(251, 146, 60, 0.62)"
+                strokeDasharray="5 6"
+                strokeWidth={1.1}
+              />
+            </g>
+          ) : null}
+
           {overlayGeometry.probabilityZones.map((zone) => (
             <g key={zone.id}>
               {(() => {
@@ -2396,6 +3341,41 @@ export function MetalChart({
               >
                 {overlayGeometry.retracementBarrier.label}
               </text>
+            </g>
+          ) : null}
+
+          {overlayGeometry.userLines.map((line) => (
+            <line
+              key={line.id}
+              x1={line.x1}
+              y1={line.y1}
+              x2={line.x2}
+              y2={line.y2}
+              stroke={DRAW_LINE_COLOR}
+              strokeWidth={2.1}
+              strokeLinecap="round"
+            />
+          ))}
+
+          {overlayGeometry.pendingLineAnchor ? (
+            <g>
+              <circle
+                cx={overlayGeometry.pendingLineAnchor.x}
+                cy={overlayGeometry.pendingLineAnchor.y}
+                r={5.5}
+                fill="#06111f"
+                stroke={DRAW_LINE_COLOR}
+                strokeWidth={1.8}
+              />
+              <circle
+                cx={overlayGeometry.pendingLineAnchor.x}
+                cy={overlayGeometry.pendingLineAnchor.y}
+                r={10}
+                fill="none"
+                stroke="rgba(168, 85, 247, 0.28)"
+                strokeDasharray="4 5"
+                strokeWidth={1}
+              />
             </g>
           ) : null}
 
