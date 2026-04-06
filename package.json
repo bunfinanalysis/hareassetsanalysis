@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --test --experimental-strip-types --experimental-specifier-resolution=node tests/*.test.ts",
     "refresh:yahoo": "node scripts/refresh-yahoo-cache.mjs"
   },
   "dependencies": {

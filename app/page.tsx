@@ -40,34 +40,6 @@ import { useMarketStore } from "@/store/market-store";
 const ACCESS_CODE = "Hare5626";
 const ACCESS_STORAGE_KEY = "hareassets-site-access";
 
-function StatTile({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "positive" | "negative";
-}) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-white/4 px-4 py-3">
-      <p className="text-[11px] uppercase tracking-[0.28em] text-muted-foreground">
-        {label}
-      </p>
-      <p
-        className={cn(
-          "mt-2 text-sm font-semibold sm:text-base",
-          tone === "positive" && "text-positive",
-          tone === "negative" && "text-negative",
-          tone === "neutral" && "text-foreground",
-        )}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
-
 function AccessGate({
   accessCode,
   errorMessage,
@@ -192,7 +164,7 @@ function DashboardContent() {
         source={snapshot?.source}
       />
 
-      <main className="relative z-10 mx-auto flex w-full max-w-[1820px] flex-1 flex-col gap-4 px-4 py-4 lg:px-5">
+      <main className="relative z-10 mx-auto flex w-full max-w-[1700px] flex-1 flex-col gap-4 px-4 py-4 lg:px-5">
         {snapshot?.warning ? (
           <div className="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/8 px-4 py-3 text-sm text-amber-100">
             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
@@ -200,11 +172,11 @@ function DashboardContent() {
           </div>
         ) : null}
 
-        <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
-          <Card className="flex min-h-[74vh] flex-col overflow-hidden">
-            <CardHeader className="border-b border-white/6 px-4 py-4 sm:px-5">
-              <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
-                <div className="space-y-4">
+        <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <Card className="flex min-h-[68vh] flex-col overflow-hidden xl:h-[82vh] xl:min-h-0 xl:max-h-[860px]">
+            <CardHeader className="border-b border-white/6 px-4 py-3 sm:px-5">
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px] xl:items-start">
+                <div className="space-y-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge className="bg-primary/12 text-primary hover:bg-primary/12">
                       <CandlestickChart className="mr-1.5 h-3.5 w-3.5" />
@@ -235,43 +207,46 @@ function DashboardContent() {
                     <CardDescription className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
                       Real-time Gold and Silver charting with manual wave placement,
                       auto-detect scaffolding, live Fibonacci overlays, and a
-                      dedicated WaveBasis-style analysis rail.
+                      dedicated analysis rail.
                     </CardDescription>
                   </div>
 
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <StatTile
-                      label="Live Price"
-                      value={
-                        quote
+                  <div className="flex flex-wrap gap-2">
+                    <div className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-xs text-muted-foreground">
+                      Live:{" "}
+                      <span
+                        className={cn(
+                          "font-semibold",
+                          isPositive ? "text-positive" : "text-negative",
+                        )}
+                      >
+                        {quote
                           ? `$${formatPrice(quote.lastPrice, symbolMeta.precision)}`
-                          : "Loading"
-                      }
-                      tone={isPositive ? "positive" : "negative"}
-                    />
-                    <StatTile
-                      label="Session Position"
-                      value={quote ? `${sessionPosition.toFixed(1)}%` : "Loading"}
-                      tone={
-                        sessionPosition >= 60
-                          ? "positive"
-                          : sessionPosition <= 40
-                            ? "negative"
-                            : "neutral"
-                      }
-                    />
-                    <StatTile
-                      label="Volume"
-                      value={formatCompactNumber(quote?.volume)}
-                    />
-                    <StatTile
-                      label="Updated"
-                      value={quote ? formatClock(quote.updatedAt) : "Waiting for feed"}
-                    />
+                          : "Loading"}
+                      </span>
+                    </div>
+                    <div className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-xs text-muted-foreground">
+                      Session:{" "}
+                      <span className="font-semibold text-foreground">
+                        {quote ? `${sessionPosition.toFixed(1)}%` : "Loading"}
+                      </span>
+                    </div>
+                    <div className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-xs text-muted-foreground">
+                      Volume:{" "}
+                      <span className="font-semibold text-foreground">
+                        {formatCompactNumber(quote?.volume)}
+                      </span>
+                    </div>
+                    <div className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-xs text-muted-foreground">
+                      Updated:{" "}
+                      <span className="font-semibold text-foreground">
+                        {quote ? formatClock(quote.updatedAt) : "Waiting"}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="w-full xl:w-auto xl:min-w-[360px]">
+                <div className="w-full xl:w-auto xl:min-w-[300px]">
                   <div className="rounded-[20px] border border-white/8 bg-white/4 p-3">
                     <div className="flex items-center gap-2">
                       <Waves className="h-4 w-4 text-primary" />
@@ -287,7 +262,7 @@ function DashboardContent() {
               </div>
             </CardHeader>
 
-            <CardContent className="flex flex-1 flex-col p-4 pt-4 sm:p-5">
+            <CardContent className="flex min-h-0 flex-1 flex-col p-3 pt-3 sm:p-4">
               <MetalChart
                 candles={snapshot?.candles ?? []}
                 isLoading={isLoading}
@@ -307,7 +282,7 @@ function DashboardContent() {
           </Card>
 
           <WaveAnalysisPanel
-            className="min-h-[74vh]"
+            className="min-h-[68vh] xl:h-[82vh] xl:min-h-0 xl:max-h-[860px]"
             waveAnalysis={waveAnalysis}
             wavePoints={wavePoints}
             alternateCount={alternateCount}

@@ -13,6 +13,13 @@ export type SwingKind = "high" | "low";
 export type WaveRuleStatus = "pass" | "warning" | "fail";
 export type WaveRuleSeverity = "hard" | "soft";
 
+type CorrectiveStructureType =
+  | "zigzag"
+  | "flat"
+  | "expanded-flat"
+  | "running-flat"
+  | "undetermined";
+
 export type WavePoint = {
   id: string;
   label: WaveLabel;
@@ -93,6 +100,7 @@ export type WaveMeasurements = {
   wave4Retracement?: number;
   wave5Length?: number;
   wave5ToWave1Ratio?: number;
+  wave5ToWave13Ratio?: number;
   waveBToARatio?: number;
   waveCToARatio?: number;
 };
@@ -126,6 +134,9 @@ export type AutoDetectedWaveCandidate = {
   validation: WaveValidationResult;
   confidence: number;
   futureProjection: FutureProjection | null;
+  recencyScore: number;
+  selectionScore: number;
+  candlesFromLatest: number;
   swings: ZigZagSwing[];
   deviationPercent: number;
   depth: number;
@@ -182,6 +193,12 @@ const DEFAULT_ZIGZAG_OPTIONS = {
 
 const DEFAULT_AUTO_DETECT_DEPTH_LEVELS = [4, 5, 7] as const;
 const DEFAULT_AUTO_DETECT_BACKSTEP_LEVELS = [2, 3] as const;
+
+const WAVE2_FIB_TARGETS = [0.5, 0.618, 0.764, 0.854] as const;
+const WAVE3_FIB_TARGETS = [1.618, 2, 2.618, 3.236] as const;
+const WAVE4_FIB_TARGETS = [0.146, 0.236, 0.382] as const;
+const WAVE5_FIB_TARGETS = [0.618, 1, 1.618] as const;
+const WAVEC_FIB_TARGETS = [0.618, 1, 1.236, 1.618] as const;
 
 const WAVE_LABEL_ORDER: Record<WaveLabel, number> = {
   "1": 0,
@@ -486,6 +503,68 @@ function buildCountSignature(count: WaveCount) {
   });
 }
 
+function getWaveCountEndIndex(count: WaveCount) {
+  const sortedPoints = sortWavePoints(count.points);
+  const latestPoint = sortedPoints[sortedPoints.length - 1];
+
+  if (typeof latestPoint?.index === "number") {
+    return latestPoint.index;
+  }
+
+  if (typeof count.anchor?.index === "number") {
+    return count.anchor.index;
+  }
+
+  return -1;
+}
+
+function calculateCandidateRecencyScore(
+  endIndex: number,
+  latestCandleIndex: number,
+) {
+  if (endIndex < 0 || latestCandleIndex < 0) {
+    return 0;
+  }
+
+  const candlesFromLatest = Math.max(latestCandleIndex - endIndex, 0);
+  const strongWindow = Math.max(6, Math.round((latestCandleIndex + 1) * 0.05));
+  const fadeWindow = Math.max(strongWindow + 8, Math.round((latestCandleIndex + 1) * 0.18));
+
+  if (candlesFromLatest <= strongWindow) {
+    return 100;
+  }
+
+  if (candlesFromLatest >= fadeWindow) {
+    return 0;
+  }
+
+  return roundTo(
+    ((fadeWindow - candlesFromLatest) / Math.max(fadeWindow - strongWindow, 1)) * 100,
+    2,
+  );
+}
+
+function calculateCandidateSelectionScore(
+  count: WaveCount,
+  confidence: number,
+  recencyScore: number,
+  futureProjection: FutureProjection | null,
+) {
+  const projectionScore = futureProjection?.probability ?? confidence;
+  const isComplete =
+    (count.pattern === "impulse" && count.points.length === IMPULSE_LABELS.length) ||
+    (count.pattern === "corrective" && count.points.length === CORRECTIVE_LABELS.length);
+  const nearComplete =
+    (count.pattern === "impulse" && count.points.length === IMPULSE_LABELS.length - 1) ||
+    (count.pattern === "corrective" && count.points.length === CORRECTIVE_LABELS.length - 1);
+  const completionBonus = isComplete ? 6 : nearComplete ? 3 : 0;
+
+  return roundTo(
+    clamp(confidence * 0.62 + recencyScore * 0.28 + projectionScore * 0.1 + completionBonus, 0, 100),
+    2,
+  );
+}
+
 function scoreTargetRatio(
   value: number | undefined,
   target: number,
@@ -654,6 +733,138 @@ function scoreImpulseAlternation(
   return 40;
 }
 
+function inferCorrectiveStructureType(
+  waveBToARatio?: number,
+  waveCToARatio?: number,
+  waveCExtends?: boolean,
+): CorrectiveStructureType {
+  if (
+    typeof waveBToARatio !== "number" ||
+    !Number.isFinite(waveBToARatio) ||
+    waveBToARatio <= 0
+  ) {
+    return "undetermined";
+  }
+
+  if (waveBToARatio >= 0.5 && waveBToARatio <= 0.886) {
+    return "zigzag";
+  }
+
+  if (waveBToARatio > 0.886 && waveBToARatio <= 1.05) {
+    return waveCExtends === false && typeof waveCToARatio === "number" && waveCToARatio < 1
+      ? "running-flat"
+      : "flat";
+  }
+
+  if (waveBToARatio > 1.05 && waveBToARatio <= 1.236) {
+    return "expanded-flat";
+  }
+
+  return "undetermined";
+}
+
+function describeCorrectiveStructure(structureType: CorrectiveStructureType) {
+  switch (structureType) {
+    case "zigzag":
+      return {
+        label: "Likely zigzag",
+        detail: "Wave B is relatively shallow and Wave C should usually target equality or 1.618x Wave A.",
+      };
+    case "flat":
+      return {
+        label: "Likely flat",
+        detail: "Wave B retraces deeply and Wave C often completes near 1.000x to 1.236x Wave A.",
+      };
+    case "expanded-flat":
+      return {
+        label: "Likely expanded flat",
+        detail: "Wave B exceeds the start of Wave A and Wave C usually extends beyond Wave A with stronger follow-through.",
+      };
+    case "running-flat":
+      return {
+        label: "Likely running flat",
+        detail: "Wave B is very deep while Wave C stays comparatively short, often signaling strong trend pressure.",
+      };
+    default:
+      return {
+        label: "Undetermined correction",
+        detail: "The ABC structure is valid, but the depth and projection do not strongly match a classic zigzag or flat profile yet.",
+      };
+  }
+}
+
+function scoreCorrectiveStructureProfile(
+  waveBToARatio?: number,
+  waveCToARatio?: number,
+  waveCExtends?: boolean,
+) {
+  const structureType = inferCorrectiveStructureType(
+    waveBToARatio,
+    waveCToARatio,
+    waveCExtends,
+  );
+
+  switch (structureType) {
+    case "zigzag":
+      return roundTo(
+        average([
+          scoreRange(waveBToARatio, 0.5, 0.886, 0.382, 1),
+          scoreAlternativeTargets(waveCToARatio, [
+            { target: 1, idealTolerance: 0.14, maxTolerance: 0.4 },
+            { target: 1.618, idealTolerance: 0.18, maxTolerance: 0.55 },
+          ]),
+        ]),
+        2,
+      );
+    case "flat":
+      return roundTo(
+        average([
+          scoreRange(waveBToARatio, 0.9, 1.05, 0.786, 1.12),
+          scoreAlternativeTargets(waveCToARatio, [
+            { target: 1, idealTolerance: 0.14, maxTolerance: 0.4 },
+            { target: 1.236, idealTolerance: 0.14, maxTolerance: 0.4 },
+          ]),
+        ]),
+        2,
+      );
+    case "expanded-flat":
+      return roundTo(
+        average([
+          scoreRange(waveBToARatio, 1, 1.236, 0.886, 1.382),
+          scoreAlternativeTargets(waveCToARatio, [
+            { target: 1.236, idealTolerance: 0.14, maxTolerance: 0.45 },
+            { target: 1.618, idealTolerance: 0.18, maxTolerance: 0.55 },
+          ]),
+        ]),
+        2,
+      );
+    case "running-flat":
+      return roundTo(
+        average([
+          scoreRange(waveBToARatio, 0.9, 1.1, 0.786, 1.236),
+          scoreAlternativeTargets(waveCToARatio, [
+            { target: 0.618, idealTolerance: 0.12, maxTolerance: 0.35 },
+            { target: 1, idealTolerance: 0.14, maxTolerance: 0.4 },
+          ]),
+        ]),
+        2,
+      );
+    default:
+      return roundTo(
+        average([
+          scoreRange(waveBToARatio, 0.5, 1.0, 0.382, 1.236),
+          scoreAlternativeTargets(waveCToARatio, [
+            { target: 0.618, idealTolerance: 0.12, maxTolerance: 0.35 },
+            { target: 1, idealTolerance: 0.14, maxTolerance: 0.4 },
+            { target: 1.236, idealTolerance: 0.14, maxTolerance: 0.4 },
+            { target: 1.618, idealTolerance: 0.18, maxTolerance: 0.55 },
+          ]),
+        ]),
+        2,
+      );
+  }
+}
+
 function scoreCorrectiveSymmetry(
   count: WaveCount,
 ) {
@@ -706,6 +917,48 @@ function scoreWave3Prominence(
   return roundTo(clamp((wave3Length / comparisonBase - 1) / 0.6, 0, 1) * 90, 2);
 }
 
+function scoreWave5TerminalBehavior(
+  wave3Length?: number,
+  wave5Length?: number,
+  wave5ToWave1Ratio?: number,
+) {
+  if (
+    typeof wave3Length !== "number" ||
+    typeof wave5Length !== "number" ||
+    wave3Length <= 0 ||
+    wave5Length <= 0
+  ) {
+    return 0;
+  }
+
+  const relativeSize = wave5Length / Math.max(wave3Length, 0.0001);
+  const ratioHint =
+    typeof wave5ToWave1Ratio === "number"
+      ? scoreAlternativeTargets(wave5ToWave1Ratio, [
+          { target: 0.618, idealTolerance: 0.12, maxTolerance: 0.45 },
+          { target: 1, idealTolerance: 0.14, maxTolerance: 0.5 },
+        ])
+      : 0;
+
+  if (relativeSize <= 0.7) {
+    return roundTo(clamp(92 + ratioHint * 0.08, 0, 100), 2);
+  }
+
+  if (relativeSize <= 1) {
+    return roundTo(clamp(82 + ratioHint * 0.1, 0, 100), 2);
+  }
+
+  if (relativeSize <= 1.2) {
+    return roundTo(clamp(64 + ratioHint * 0.08, 0, 100), 2);
+  }
+
+  if (relativeSize <= 1.45) {
+    return roundTo(clamp(42 + ratioHint * 0.06, 0, 100), 2);
+  }
+
+  return roundTo(clamp(18 + ratioHint * 0.05, 0, 100), 2);
+}
+
 function buildProjectionFromCandidates(
   label: string,
   baseProbability: number,
@@ -748,29 +1001,31 @@ function buildWave5Projection(
     return null;
   }
 
-  const [wave1Point, , , wave4Point] = sortWavePoints(count.points);
+  const points = sortWavePoints(count.points);
+  const [wave1Point, wave2Point, wave3Point, wave4Point] = points;
   const wave1SignedMove = wave1Point.price - count.anchor.price;
+  const wave3SignedMove = wave3Point.price - wave2Point.price;
   const wave3ToWave1Ratio = measurements.wave3ToWave1Ratio;
   const wave4Retracement = measurements.wave4Retracement;
-  const ratios = [0.618, 1, 1.618] as const;
+  const combinedWave13Move = wave1SignedMove + wave3SignedMove;
+  const actualWave5Point = points[4];
+  const actualWave5Price = actualWave5Point?.price;
 
-  const candidates = ratios.map<ProjectionCandidate>((ratio) => {
+  const candidates = WAVE5_FIB_TARGETS.map<ProjectionCandidate>((ratio) => {
     let ratioProbability = 52;
 
     if (typeof wave3ToWave1Ratio === "number") {
-      if (wave3ToWave1Ratio >= 1.45) {
+      if (wave3ToWave1Ratio >= 2) {
         if (ratio === 0.618) {
-          ratioProbability += 28;
+          ratioProbability += 30;
         } else if (ratio === 1) {
-          ratioProbability += 20;
-        } else if (ratio === 1.618) {
-          ratioProbability += 8;
+          ratioProbability += 18;
         }
-      } else if (wave3ToWave1Ratio >= 1) {
+      } else if (wave3ToWave1Ratio >= 1.618) {
         if (ratio === 1) {
           ratioProbability += 24;
         } else if (ratio === 1.618) {
-          ratioProbability += 18;
+          ratioProbability += 14;
         } else if (ratio === 0.618) {
           ratioProbability += 10;
         }
@@ -788,10 +1043,20 @@ function buildWave5Projection(
         if (ratio === 1.618) {
           ratioProbability += 8;
         }
-      } else if (wave4Retracement >= 0.45) {
+      } else if (wave4Retracement >= 0.382) {
         if (ratio === 0.618 || ratio === 1) {
           ratioProbability += 8;
         }
+      }
+    }
+
+    if (typeof actualWave5Price === "number") {
+      const targetDistance = percentMove(actualWave5Price, wave4Point.price + wave1SignedMove * ratio);
+
+      if (targetDistance <= 0.75) {
+        ratioProbability += 10;
+      } else if (targetDistance <= 1.5) {
+        ratioProbability += 5;
       }
     }
 
@@ -800,6 +1065,27 @@ function buildWave5Projection(
       price: wave4Point.price + wave1SignedMove * ratio,
       probability: roundTo(clamp(ratioProbability, 0, 100), 2),
     };
+  });
+
+  candidates.push({
+    ratio: 0.618,
+    price: wave4Point.price + combinedWave13Move * 0.618,
+    probability: roundTo(
+      clamp(
+        70 +
+          (typeof measurements.wave3ToWave1Ratio === "number" &&
+          measurements.wave3ToWave1Ratio >= 1.618
+            ? 8
+            : 0) +
+          (typeof actualWave5Price === "number" &&
+          percentMove(actualWave5Price, wave4Point.price + combinedWave13Move * 0.618) <= 1
+            ? 8
+            : 0),
+        0,
+        100,
+      ),
+      2,
+    ),
   });
 
   return buildProjectionFromCandidates("Wave 5 Target Zone", baseProbability, candidates);
@@ -850,18 +1136,49 @@ function buildWaveCProjection(
   const [waveA, waveB] = sortWavePoints(count.points);
   const waveASignedMove = waveA.price - count.anchor.price;
   const waveBToARatio = measurements.waveBToARatio;
-  const ratios = [1, 1.618] as const;
+  const structureType = inferCorrectiveStructureType(waveBToARatio);
+  const actualWaveCPrice = count.points[2]?.price;
 
-  const candidates = ratios.map<ProjectionCandidate>((ratio) => {
-    let ratioProbability = ratio === 1 ? 72 : 78;
+  const candidates = WAVEC_FIB_TARGETS.map<ProjectionCandidate>((ratio) => {
+    let ratioProbability = ratio === 1 ? 76 : ratio === 1.618 ? 82 : 70;
 
     if (typeof waveBToARatio === "number") {
-      if (waveBToARatio >= 0.618) {
+      if (structureType === "zigzag") {
+        if (ratio === 1 || ratio === 1.618) {
+          ratioProbability += 12;
+        }
+      } else if (structureType === "flat") {
+        if (ratio === 1 || ratio === 1.236) {
+          ratioProbability += 12;
+        }
+      } else if (structureType === "expanded-flat") {
+        if (ratio === 1.236 || ratio === 1.618) {
+          ratioProbability += 12;
+        }
+      } else if (structureType === "running-flat") {
+        if (ratio === 0.618 || ratio === 1) {
+          ratioProbability += 12;
+        }
+      } else if (waveBToARatio >= 0.764) {
         if (ratio === 1) {
+          ratioProbability += 10;
+        }
+      } else if (waveBToARatio >= 0.5) {
+        if (ratio === 1 || ratio === 1.236) {
           ratioProbability += 8;
         }
       } else if (ratio === 1.618) {
         ratioProbability += 8;
+      }
+    }
+
+    if (typeof actualWaveCPrice === "number") {
+      const targetDistance = percentMove(actualWaveCPrice, waveB.price + waveASignedMove * ratio);
+
+      if (targetDistance <= 0.75) {
+        ratioProbability += 10;
+      } else if (targetDistance <= 1.5) {
+        ratioProbability += 5;
       }
     }
 
@@ -873,55 +1190,6 @@ function buildWaveCProjection(
   });
 
   return buildProjectionFromCandidates("Wave C Objective", baseProbability, candidates);
-}
-
-function buildPostImpulseProjection(
-  count: WaveCount,
-  baseProbability: number,
-) {
-  if (!count.anchor || count.points.length < 5) {
-    return null;
-  }
-
-  const points = sortWavePoints(count.points);
-  const impulseMove = points[4].price - count.anchor.price;
-  const candidates: ProjectionCandidate[] = [
-    {
-      ratio: 0.236,
-      price: points[4].price - impulseMove * 0.236,
-      probability: 68,
-    },
-    {
-      ratio: 0.382,
-      price: points[4].price - impulseMove * 0.382,
-      probability: 82,
-    },
-  ];
-
-  return buildProjectionFromCandidates("Wave A Objective", baseProbability, candidates);
-}
-
-function buildPostCorrectiveProjection(
-  validation: WaveValidationResult,
-  baseProbability: number,
-) {
-  const activeLevel =
-    validation.fibonacciLevels.find((level) => level.isActive) ??
-    validation.fibonacciLevels[0];
-
-  if (!activeLevel) {
-    return null;
-  }
-
-  return {
-    nextTargetPrice: roundTo(activeLevel.price, 4),
-    nextWaveTarget: roundTo(activeLevel.price, 4),
-    probability: roundTo(clamp(baseProbability * 0.92, 0, 100), 2),
-    minTarget: roundTo(activeLevel.price * 0.9985, 4),
-    maxTarget: roundTo(activeLevel.price * 1.0015, 4),
-    label: "Post-C Reversal Zone",
-    scenarioLabel: "Post-C Reversal Zone",
-  };
 }
 
 function scoreSwingSet(
@@ -976,30 +1244,63 @@ function calculateImpulseProbabilityFromValidation(
     wave4Retracement,
     wave5Length,
     wave5ToWave1Ratio,
+    wave5ToWave13Ratio,
   } = validation.measurements;
 
   const fibonacciScores: number[] = [];
 
   if (typeof wave2Retracement === "number") {
-    fibonacciScores.push(scoreRange(wave2Retracement, 0.382, 0.786, 0.236, 1));
+    fibonacciScores.push(
+      scoreAlternativeTargets(
+        wave2Retracement,
+        WAVE2_FIB_TARGETS.map((target) => ({
+          target,
+          idealTolerance: target === 0.854 ? 0.04 : 0.035,
+          maxTolerance: 0.18,
+        })),
+      ),
+    );
   }
 
   if (typeof wave3ToWave1Ratio === "number") {
-    fibonacciScores.push(scoreTargetRatio(wave3ToWave1Ratio, 1.618, 0.18, 0.85));
+    fibonacciScores.push(
+      scoreAlternativeTargets(
+        wave3ToWave1Ratio,
+        WAVE3_FIB_TARGETS.map((target) => ({
+          target,
+          idealTolerance: target === 3.236 ? 0.24 : 0.16,
+          maxTolerance: target === 3.236 ? 0.8 : 0.65,
+        })),
+      ),
+    );
   }
 
   if (typeof wave4Retracement === "number") {
-    fibonacciScores.push(scoreRange(wave4Retracement, 0.236, 0.5, 0.146, 0.786));
+    fibonacciScores.push(
+      scoreAlternativeTargets(
+        wave4Retracement,
+        WAVE4_FIB_TARGETS.map((target) => ({
+          target,
+          idealTolerance: 0.025,
+          maxTolerance: 0.16,
+        })),
+      ),
+    );
   }
 
   if (typeof wave5ToWave1Ratio === "number") {
     fibonacciScores.push(
-      scoreAlternativeTargets(wave5ToWave1Ratio, [
-        { target: 0.618, idealTolerance: 0.12, maxTolerance: 0.65 },
-        { target: 1, idealTolerance: 0.15, maxTolerance: 0.8 },
-        { target: 1.618, idealTolerance: 0.18, maxTolerance: 1.1 },
-        { target: 2.618, idealTolerance: 0.28, maxTolerance: 1.6 },
-      ]),
+      Math.max(
+        scoreAlternativeTargets(
+          wave5ToWave1Ratio,
+          WAVE5_FIB_TARGETS.map((target) => ({
+            target,
+            idealTolerance: target === 1.618 ? 0.18 : 0.14,
+            maxTolerance: target === 1.618 ? 0.55 : 0.4,
+          })),
+        ),
+        scoreTargetRatio(wave5ToWave13Ratio, 0.618, 0.1, 0.35),
+      ),
     );
   }
 
@@ -1017,6 +1318,11 @@ function calculateImpulseProbabilityFromValidation(
           ? 82
           : 56
       : 0;
+  const wave5TerminalScore = scoreWave5TerminalBehavior(
+    wave3Length,
+    wave5Length,
+    wave5ToWave1Ratio,
+  );
   const balanceScore = average([lengthBalanceScore, wave3ProminenceScore].filter((score) => score > 0));
   const alternationScore =
     typeof wave2Retracement === "number" && typeof wave4Retracement === "number"
@@ -1025,10 +1331,11 @@ function calculateImpulseProbabilityFromValidation(
   const softRuleScore = scoreSoftRules(validation);
 
   const probability =
-    fibonacciScore * 0.45 +
-    balanceScore * 0.25 +
-    alternationScore * 0.2 +
-    softRuleScore * 0.1;
+    fibonacciScore * 0.4 +
+    balanceScore * 0.22 +
+    alternationScore * 0.18 +
+    wave5TerminalScore * 0.12 +
+    softRuleScore * 0.08;
 
   const pointCountBonus =
     count.points.length === 5 ? 6 : count.points.length === 4 ? 10 : count.points.length === 3 ? 4 : 0;
@@ -1045,29 +1352,46 @@ function calculateCorrectiveProbabilityFromValidation(
   }
 
   const { waveBToARatio, waveCToARatio } = validation.measurements;
+  const directionMultiplier = count.direction === "bullish" ? 1 : -1;
+  const waveA = count.points[0];
+  const waveC = count.points[2];
+  const waveCExtends =
+    count.anchor && waveA && waveC
+      ? (waveC.price - waveA.price) * directionMultiplier > 0
+      : undefined;
   const fibonacciScores: number[] = [];
 
   if (typeof waveBToARatio === "number") {
-    fibonacciScores.push(scoreRange(waveBToARatio, 0.382, 0.886, 0.236, 1.236));
+    fibonacciScores.push(scoreRange(waveBToARatio, 0.5, 0.886, 0.382, 1));
   }
 
   if (typeof waveCToARatio === "number") {
     fibonacciScores.push(
-      scoreAlternativeTargets(waveCToARatio, [
-        { target: 1, idealTolerance: 0.14, maxTolerance: 0.9 },
-        { target: 1.618, idealTolerance: 0.2, maxTolerance: 1.1 },
-      ]),
+      scoreAlternativeTargets(
+        waveCToARatio,
+        WAVEC_FIB_TARGETS.map((target) => ({
+          target,
+          idealTolerance: target === 1.618 ? 0.18 : 0.14,
+          maxTolerance: target === 1.618 ? 0.55 : 0.4,
+        })),
+      ),
     );
   }
 
   const fibonacciScore = fibonacciScores.length > 0 ? average(fibonacciScores) : 0;
   const balanceScore = count.points.length >= 3 ? scoreCorrectiveSymmetry(count) : 58;
   const softRuleScore = scoreSoftRules(validation);
+  const structureScore = scoreCorrectiveStructureProfile(
+    waveBToARatio,
+    waveCToARatio,
+    waveCExtends,
+  );
 
   const probability =
-    fibonacciScore * 0.5 +
-    balanceScore * 0.25 +
-    softRuleScore * 0.25;
+    fibonacciScore * 0.38 +
+    balanceScore * 0.22 +
+    structureScore * 0.25 +
+    softRuleScore * 0.15;
 
   const pointCountBonus = count.points.length >= 3 ? 4 : 0;
 
@@ -1624,71 +1948,103 @@ function validatePartialImpulseCount(count: WaveCount): WaveValidationResult {
   }
 
   if (typeof wave2Retracement === "number") {
+    const wave2FibScore = scoreAlternativeTargets(
+      wave2Retracement,
+      WAVE2_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: target === 0.854 ? 0.04 : 0.035,
+        maxTolerance: 0.18,
+      })),
+    );
+
     rules.push(
       buildRule(
         "wave-2-fib",
         "Wave 2 Fibonacci retracement",
-        "Wave 2 commonly retraces 38.2% to 78.6% of Wave 1.",
-        `Wave 2 retracement of ${formatRatio(wave2Retracement)} is being compared against the 0.382 to 0.786 zone.`,
-        wave2Retracement >= 0.382 && wave2Retracement <= 0.786
+        "Wave 2 most commonly retraces 50.0%, 61.8%, 76.4%, or 85.4% of Wave 1.",
+        `Wave 2 retracement of ${formatRatio(wave2Retracement)} is being compared against the 0.500, 0.618, 0.764, and 0.854 retracement cluster.`,
+        wave2FibScore >= 78
           ? "pass"
-          : wave2Retracement <= 1
+          : wave2Retracement <= 1 && wave2FibScore >= 40
             ? "warning"
             : "fail",
         "soft",
         wave2Retracement,
-        "0.382 - 0.786",
+        "0.500 / 0.618 / 0.764 / 0.854",
       ),
     );
   }
 
   if (typeof wave3ToWave1Ratio === "number") {
+    const wave3FibScore = scoreAlternativeTargets(
+      wave3ToWave1Ratio,
+      WAVE3_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: target === 3.236 ? 0.24 : 0.16,
+        maxTolerance: target === 3.236 ? 0.8 : 0.65,
+      })),
+    );
+
     rules.push(
       buildRule(
         "wave-3-fib",
         "Wave 3 Fibonacci extension",
-        "Wave 3 often measures about 1.618 times Wave 1.",
-        `Wave 3 extension ratio of ${formatRatio(wave3ToWave1Ratio)} is being compared with 1.618.`,
-        Math.abs(wave3ToWave1Ratio - 1.618) <= 0.2
+        "Wave 3 most commonly extends 161.8%, 200.0%, 261.8%, or 323.6% of Wave 1.",
+        `Wave 3 extension ratio of ${formatRatio(wave3ToWave1Ratio)} is being compared against 1.618, 2.000, 2.618, and 3.236.`,
+        wave3FibScore >= 78
           ? "pass"
-          : wave3ToWave1Ratio >= 1
+          : wave3ToWave1Ratio >= 1 && wave3FibScore >= 40
             ? "warning"
             : "fail",
         "soft",
         wave3ToWave1Ratio,
-        "1.618",
+        "1.618 / 2.000 / 2.618 / 3.236",
       ),
     );
   }
 
   if (typeof wave4Retracement === "number") {
+    const wave4FibScore = scoreAlternativeTargets(
+      wave4Retracement,
+      WAVE4_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: 0.025,
+        maxTolerance: 0.16,
+      })),
+    );
+
     rules.push(
       buildRule(
         "wave-4-fib",
         "Wave 4 Fibonacci retracement",
-        "Wave 4 commonly retraces 23.6% to 50.0% of Wave 3.",
-        `Wave 4 retracement of ${formatRatio(wave4Retracement)} is being compared against the 0.236 to 0.500 zone.`,
-        wave4Retracement >= 0.236 && wave4Retracement <= 0.5
+        "Wave 4 ideally retraces 14.6%, 23.6%, or 38.2% of Wave 3.",
+        `Wave 4 retracement of ${formatRatio(wave4Retracement)} is being compared against the 0.146, 0.236, and 0.382 retracement cluster.`,
+        wave4FibScore >= 78
           ? "pass"
-          : wave4Retracement <= 0.786
+          : wave4Retracement <= 0.5 && wave4FibScore >= 40
             ? "warning"
             : "fail",
         "soft",
         wave4Retracement,
-        "0.236 - 0.500",
+        "0.146 / 0.236 / 0.382",
       ),
     );
   }
 
   const fibonacciLevels = [
     ...markNearestFibLevel(
-      buildRetracementLevels(origin.price, wave1Point.price, [0.382, 0.5, 0.618, 0.786, 1], "Wave 2"),
+      buildRetracementLevels(
+        origin.price,
+        wave1Point.price,
+        [...WAVE2_FIB_TARGETS, 1],
+        "Wave 2",
+      ),
       wave2Point.price,
     ),
     ...markNearestFibLevel(
       buildExtensionLevels(
         wave2Point.price,
-        [1, 1.272, 1.618, 2.618],
+        [...WAVE3_FIB_TARGETS],
         wave1Point.price - origin.price,
         "Wave 3",
       ),
@@ -1699,7 +2055,7 @@ function validatePartialImpulseCount(count: WaveCount): WaveValidationResult {
           buildRetracementLevels(
             wave2Point.price,
             wave3Point.price,
-            [0.236, 0.382, 0.5, 0.618],
+            [...WAVE4_FIB_TARGETS],
             "Wave 4",
           ),
           wave4Point.price,
@@ -1708,7 +2064,7 @@ function validatePartialImpulseCount(count: WaveCount): WaveValidationResult {
     ...(wave4Point
       ? buildExtensionLevels(
           wave4Point.price,
-          [0.618, 1, 1.618, 2.618],
+          [...WAVE5_FIB_TARGETS],
           wave1Point.price - origin.price,
           "Wave 5",
         )
@@ -1799,6 +2155,8 @@ function validatePartialCorrectiveCount(count: WaveCount): WaveValidationResult 
   const waveALength = (waveA.price - count.anchor.price) * directionMultiplier;
   const waveBPullback = (waveA.price - waveB.price) * directionMultiplier;
   const waveBToARatio = waveALength > 0 ? waveBPullback / waveALength : undefined;
+  const structureType = inferCorrectiveStructureType(waveBToARatio);
+  const structureDescription = describeCorrectiveStructure(structureType);
 
   rules.push(
     buildRule(
@@ -1829,20 +2187,42 @@ function validatePartialCorrectiveCount(count: WaveCount): WaveValidationResult 
   );
 
   if (typeof waveBToARatio === "number") {
+    const waveBFibScore = scoreRange(waveBToARatio, 0.5, 0.886, 0.382, 1);
+
     rules.push(
       buildRule(
         "wave-b-fib",
         "Wave B Fibonacci retracement",
-        "Wave B often retraces 38.2% to 88.6% of Wave A.",
-        `Wave B retracement of ${formatRatio(waveBToARatio)} is being compared against the preferred 0.382 to 0.886 band.`,
-        waveBToARatio >= 0.382 && waveBToARatio <= 0.886
+        "Wave B ideally retraces 50.0% to 88.6% of Wave A.",
+        `Wave B retracement of ${formatRatio(waveBToARatio)} is being compared against the 0.500 to 0.886 retracement zone.`,
+        waveBFibScore >= 78
           ? "pass"
-          : waveBToARatio > 0 && waveBToARatio <= 1.236
+          : waveBToARatio > 0 && waveBFibScore >= 40
             ? "warning"
             : "fail",
         "soft",
         waveBToARatio,
-        "0.382 - 0.886",
+        "0.500 - 0.886",
+      ),
+    );
+
+    rules.push(
+      buildRule(
+        "corrective-structure-profile",
+        structureDescription.label,
+        "Experienced Elliott Wave analysis distinguishes zigzags from flats largely through Wave B depth before Wave C unfolds.",
+        structureType === "zigzag"
+          ? `Wave B depth of ${formatRatio(waveBToARatio)} fits a classic zigzag profile.`
+          : structureType === "flat" || structureType === "expanded-flat" || structureType === "running-flat"
+            ? `Wave B depth of ${formatRatio(waveBToARatio)} suggests a flat-style correction rather than a simple zigzag.`
+            : `Wave B depth of ${formatRatio(waveBToARatio)} does not yet strongly favor one corrective family.`,
+        structureType === "zigzag"
+          ? "pass"
+          : structureType === "flat" || structureType === "expanded-flat" || structureType === "running-flat"
+            ? "warning"
+            : "warning",
+        "soft",
+        waveBToARatio,
       ),
     );
   }
@@ -1851,7 +2231,7 @@ function validatePartialCorrectiveCount(count: WaveCount): WaveValidationResult 
     buildRetracementLevels(
       count.anchor.price,
       waveA.price,
-      [0.382, 0.5, 0.618, 0.786, 0.886],
+      [0.5, 0.618, 0.764, 0.854, 0.886],
       "Wave B",
     ),
     waveB.price,
@@ -1949,6 +2329,8 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
   const wave3ToWave1Ratio = wave1Length > 0 ? wave3Length / wave1Length : undefined;
   const wave4Retracement = wave3Length > 0 ? wave4Pullback / wave3Length : undefined;
   const wave5ToWave1Ratio = wave1Length > 0 ? wave5Length / wave1Length : undefined;
+  const wave5ToWave13Ratio =
+    wave1Length + wave3Length > 0 ? wave5Length / (wave1Length + wave3Length) : undefined;
 
   rules.push(
     buildRule(
@@ -2025,10 +2407,18 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
   );
 
   if (typeof wave2Retracement === "number") {
+    const wave2FibScore = scoreAlternativeTargets(
+      wave2Retracement,
+      WAVE2_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: target === 0.854 ? 0.04 : 0.035,
+        maxTolerance: 0.18,
+      })),
+    );
     const wave2Status =
-      wave2Retracement >= 0.382 && wave2Retracement <= 0.786
+      wave2FibScore >= 78
         ? "pass"
-        : wave2Retracement <= 1
+        : wave2Retracement <= 1 && wave2FibScore >= 40
           ? "warning"
           : "fail";
 
@@ -2036,24 +2426,31 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
       buildRule(
         "wave-2-fib",
         "Wave 2 Fibonacci retracement",
-        "Wave 2 commonly retraces 38.2% to 78.6% of Wave 1.",
+        "Wave 2 most commonly retraces 50.0%, 61.8%, 76.4%, or 85.4% of Wave 1.",
         wave2Status === "pass"
-          ? `Wave 2 retracement of ${formatRatio(wave2Retracement)} is within the common Fibonacci zone.`
-          : `Wave 2 retracement of ${formatRatio(wave2Retracement)} is outside the ideal 0.382 to 0.786 band.`,
+          ? `Wave 2 retracement of ${formatRatio(wave2Retracement)} aligns with the preferred retracement cluster.`
+          : `Wave 2 retracement of ${formatRatio(wave2Retracement)} is outside the ideal 0.500, 0.618, 0.764, and 0.854 cluster.`,
         wave2Status,
         "soft",
         wave2Retracement,
-        "0.382 - 0.786",
+        "0.500 / 0.618 / 0.764 / 0.854",
       ),
     );
   }
 
   if (typeof wave3ToWave1Ratio === "number") {
-    const distanceToPreferred = Math.abs(wave3ToWave1Ratio - 1.618);
+    const wave3FibScore = scoreAlternativeTargets(
+      wave3ToWave1Ratio,
+      WAVE3_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: target === 3.236 ? 0.24 : 0.16,
+        maxTolerance: target === 3.236 ? 0.8 : 0.65,
+      })),
+    );
     const wave3Status =
-      distanceToPreferred <= 0.2
+      wave3FibScore >= 78
         ? "pass"
-        : wave3ToWave1Ratio >= 1
+        : wave3ToWave1Ratio >= 1 && wave3FibScore >= 40
           ? "warning"
           : "fail";
 
@@ -2061,23 +2458,31 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
       buildRule(
         "wave-3-fib",
         "Wave 3 Fibonacci extension",
-        "Wave 3 often measures about 1.618 times Wave 1.",
+        "Wave 3 most commonly extends 161.8%, 200.0%, 261.8%, or 323.6% of Wave 1.",
         wave3Status === "pass"
-          ? `Wave 3 extension ratio of ${formatRatio(wave3ToWave1Ratio)} is close to the classic 1.618 projection.`
-          : `Wave 3 extension ratio of ${formatRatio(wave3ToWave1Ratio)} is not close to 1.618.`,
+          ? `Wave 3 extension ratio of ${formatRatio(wave3ToWave1Ratio)} aligns with the preferred extension cluster.`
+          : `Wave 3 extension ratio of ${formatRatio(wave3ToWave1Ratio)} is outside the preferred 1.618, 2.000, 2.618, and 3.236 extension cluster.`,
         wave3Status,
         "soft",
         wave3ToWave1Ratio,
-        "1.618",
+        "1.618 / 2.000 / 2.618 / 3.236",
       ),
     );
   }
 
   if (typeof wave4Retracement === "number") {
+    const wave4FibScore = scoreAlternativeTargets(
+      wave4Retracement,
+      WAVE4_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: 0.025,
+        maxTolerance: 0.16,
+      })),
+    );
     const wave4Status =
-      wave4Retracement >= 0.236 && wave4Retracement <= 0.5
+      wave4FibScore >= 78
         ? "pass"
-        : wave4Retracement <= 0.786
+        : wave4Retracement <= 0.5 && wave4FibScore >= 40
           ? "warning"
           : "fail";
 
@@ -2085,25 +2490,34 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
       buildRule(
         "wave-4-fib",
         "Wave 4 Fibonacci retracement",
-        "Wave 4 commonly retraces 23.6% to 50.0% of Wave 3.",
+        "Wave 4 ideally retraces 14.6%, 23.6%, or 38.2% of Wave 3.",
         wave4Status === "pass"
-          ? `Wave 4 retracement of ${formatRatio(wave4Retracement)} sits inside the typical Elliott zone.`
-          : `Wave 4 retracement of ${formatRatio(wave4Retracement)} is outside the ideal 0.236 to 0.500 band.`,
+          ? `Wave 4 retracement of ${formatRatio(wave4Retracement)} aligns with the preferred shallow retracement cluster.`
+          : `Wave 4 retracement of ${formatRatio(wave4Retracement)} is outside the ideal 0.146, 0.236, and 0.382 retracement cluster.`,
         wave4Status,
         "soft",
         wave4Retracement,
-        "0.236 - 0.500",
+        "0.146 / 0.236 / 0.382",
       ),
     );
   }
 
   if (typeof wave5ToWave1Ratio === "number") {
-    const wave5Near618 = Math.abs(wave5ToWave1Ratio - 0.618);
-    const wave5Near100 = Math.abs(wave5ToWave1Ratio - 1);
+    const wave5FibScore = Math.max(
+      scoreAlternativeTargets(
+        wave5ToWave1Ratio,
+        WAVE5_FIB_TARGETS.map((target) => ({
+          target,
+          idealTolerance: target === 1.618 ? 0.18 : 0.14,
+          maxTolerance: target === 1.618 ? 0.55 : 0.4,
+        })),
+      ),
+      scoreTargetRatio(wave5ToWave13Ratio, 0.618, 0.1, 0.35),
+    );
     const wave5Status =
-      wave5Near618 <= 0.15 || wave5Near100 <= 0.15
+      wave5FibScore >= 78
         ? "pass"
-        : wave5ToWave1Ratio >= 0.382 && wave5ToWave1Ratio <= 1.618
+        : wave5ToWave1Ratio >= 0.382 && wave5FibScore >= 40
           ? "warning"
           : "fail";
 
@@ -2111,42 +2525,89 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
       buildRule(
         "wave-5-fib",
         "Wave 5 Fibonacci projection",
-        "Wave 5 often relates to Wave 1 by 0.618x or 1.000x.",
+        "Wave 5 commonly measures 61.8%, 100.0%, or 161.8% of Wave 1, or 61.8% of Waves 1 plus 3.",
         wave5Status === "pass"
-          ? `Wave 5 ratio of ${formatRatio(wave5ToWave1Ratio)} lines up with a common Fibonacci projection.`
-          : `Wave 5 ratio of ${formatRatio(wave5ToWave1Ratio)} is not close to the common 0.618x or 1.000x relationships.`,
+          ? `Wave 5 ratio of ${formatRatio(wave5ToWave1Ratio)} aligns with the preferred Wave 5 projection cluster.`
+          : `Wave 5 ratio of ${formatRatio(wave5ToWave1Ratio)} is outside the preferred 0.618x, 1.000x, 1.618x, or 0.618x of Waves 1+3 relationships.`,
         wave5Status,
         "soft",
         wave5ToWave1Ratio,
-        "0.618 or 1.000",
+        "0.618 / 1.000 / 1.618 or 0.618 of Waves 1+3",
+      ),
+    );
+  }
+
+  if (typeof wave5Length === "number" && typeof wave3Length === "number") {
+    const wave5TerminalScore = scoreWave5TerminalBehavior(
+      wave3Length,
+      wave5Length,
+      wave5ToWave1Ratio,
+    );
+    const wave5TerminalStatus =
+      wave5TerminalScore >= 78
+        ? "pass"
+        : wave5TerminalScore >= 45
+          ? "warning"
+          : "fail";
+
+    rules.push(
+      buildRule(
+        "wave-5-terminal-behavior",
+        "Wave 5 should usually be weaker than Wave 3",
+        "Many Elliott analysts expect Wave 3 to be the strongest leg and Wave 5 to show more terminal behavior or weaker momentum.",
+        wave5TerminalStatus === "pass"
+          ? "Wave 5 is behaving like a typical terminal leg relative to Wave 3."
+          : "Wave 5 is not showing the usual weaker terminal behavior relative to Wave 3.",
+        wave5TerminalStatus,
+        "soft",
+        wave5TerminalScore,
       ),
     );
   }
 
   const fibonacciLevels = [
     ...markNearestFibLevel(
-      buildRetracementLevels(origin.price, wave1Point.price, [0.382, 0.5, 0.618, 0.786, 1], "Wave 2"),
+      buildRetracementLevels(
+        origin.price,
+        wave1Point.price,
+        [...WAVE2_FIB_TARGETS, 1],
+        "Wave 2",
+      ),
       wave2Point.price,
     ),
     ...markNearestFibLevel(
       buildExtensionLevels(
         wave2Point.price,
-        [1, 1.272, 1.618, 2.618],
+        [...WAVE3_FIB_TARGETS],
         wave1Point.price - origin.price,
         "Wave 3",
       ),
       wave3Point.price,
     ),
     ...markNearestFibLevel(
-      buildRetracementLevels(wave2Point.price, wave3Point.price, [0.236, 0.382, 0.5, 0.618], "Wave 4"),
+      buildRetracementLevels(
+        wave2Point.price,
+        wave3Point.price,
+        [...WAVE4_FIB_TARGETS],
+        "Wave 4",
+      ),
       wave4Point.price,
     ),
     ...markNearestFibLevel(
       buildExtensionLevels(
         wave4Point.price,
-        [0.618, 1, 1.272, 1.618],
+        [...WAVE5_FIB_TARGETS],
         wave1Point.price - origin.price,
         "Wave 5",
+      ),
+      wave5Point.price,
+    ),
+    ...markNearestFibLevel(
+      buildExtensionLevels(
+        wave4Point.price,
+        [0.618],
+        (wave1Point.price - origin.price) + (wave3Point.price - wave2Point.price),
+        "Wave 5 (1+3)",
       ),
       wave5Point.price,
     ),
@@ -2173,6 +2634,7 @@ function validateImpulseCount(count: WaveCount): WaveValidationResult {
       wave4Retracement,
       wave5Length,
       wave5ToWave1Ratio,
+      wave5ToWave13Ratio,
     },
     messages,
   };
@@ -2248,6 +2710,12 @@ function validateCorrectiveCount(count: WaveCount): WaveValidationResult {
   const waveCToARatio = waveALength > 0 ? waveCLength / waveALength : undefined;
   const waveCExtends =
     direction === "bullish" ? waveC.price > waveA.price : waveC.price < waveA.price;
+  const structureType = inferCorrectiveStructureType(
+    waveBToARatio,
+    waveCToARatio,
+    waveCExtends,
+  );
+  const structureDescription = describeCorrectiveStructure(structureType);
 
   rules.push(
     buildRule(
@@ -2291,10 +2759,11 @@ function validateCorrectiveCount(count: WaveCount): WaveValidationResult {
   );
 
   if (typeof waveBToARatio === "number") {
+    const waveBFibScore = scoreRange(waveBToARatio, 0.5, 0.886, 0.382, 1);
     const waveBStatus =
-      waveBToARatio >= 0.382 && waveBToARatio <= 0.886
+      waveBFibScore >= 78
         ? "pass"
-        : waveBToARatio > 0 && waveBToARatio <= 1.236
+        : waveBToARatio > 0 && waveBFibScore >= 40
           ? "warning"
           : "fail";
 
@@ -2302,25 +2771,31 @@ function validateCorrectiveCount(count: WaveCount): WaveValidationResult {
       buildRule(
         "wave-b-fib",
         "Wave B Fibonacci retracement",
-        "Wave B often retraces 38.2% to 88.6% of Wave A.",
+        "Wave B ideally retraces 50.0% to 88.6% of Wave A.",
         waveBStatus === "pass"
-          ? `Wave B retracement of ${formatRatio(waveBToARatio)} is inside the normal Fibonacci band.`
-          : `Wave B retracement of ${formatRatio(waveBToARatio)} is outside the preferred 0.382 to 0.886 band.`,
+          ? `Wave B retracement of ${formatRatio(waveBToARatio)} sits inside the preferred Elliott Wave retracement band.`
+          : `Wave B retracement of ${formatRatio(waveBToARatio)} is outside the preferred 0.500 to 0.886 band.`,
         waveBStatus,
         "soft",
         waveBToARatio,
-        "0.382 - 0.886",
+        "0.500 - 0.886",
       ),
     );
   }
 
   if (typeof waveCToARatio === "number") {
-    const nearOneToOne = Math.abs(waveCToARatio - 1);
-    const nearExtended = Math.abs(waveCToARatio - 1.618);
+    const waveCFibScore = scoreAlternativeTargets(
+      waveCToARatio,
+      WAVEC_FIB_TARGETS.map((target) => ({
+        target,
+        idealTolerance: target === 1.618 ? 0.18 : 0.14,
+        maxTolerance: target === 1.618 ? 0.55 : 0.4,
+      })),
+    );
     const waveCStatus =
-      nearOneToOne <= 0.15 || nearExtended <= 0.2
+      waveCFibScore >= 78
         ? "pass"
-        : waveCToARatio >= 0.786 && waveCToARatio <= 2
+        : waveCToARatio >= 0.5 && waveCFibScore >= 40
           ? "warning"
           : "fail";
 
@@ -2328,25 +2803,67 @@ function validateCorrectiveCount(count: WaveCount): WaveValidationResult {
       buildRule(
         "wave-c-fib",
         "Wave C Fibonacci relationship",
-        "Wave C often equals Wave A or reaches 1.618 times Wave A.",
+        "Wave C commonly reaches 61.8%, 100.0%, 123.6%, or 161.8% of Wave A.",
         waveCStatus === "pass"
-          ? `Wave C ratio of ${formatRatio(waveCToARatio)} matches a common ABC relationship.`
-          : `Wave C ratio of ${formatRatio(waveCToARatio)} is not close to 1.000x or 1.618x Wave A.`,
+          ? `Wave C ratio of ${formatRatio(waveCToARatio)} aligns with the preferred Wave C projection cluster.`
+          : `Wave C ratio of ${formatRatio(waveCToARatio)} is outside the preferred 0.618x, 1.000x, 1.236x, and 1.618x Wave A targets.`,
         waveCStatus,
         "soft",
         waveCToARatio,
-        "1.000 or 1.618",
+        "0.618 / 1.000 / 1.236 / 1.618",
+      ),
+    );
+  }
+
+  if (typeof waveBToARatio === "number") {
+    const structureScore = scoreCorrectiveStructureProfile(
+      waveBToARatio,
+      waveCToARatio,
+      waveCExtends,
+    );
+
+    rules.push(
+      buildRule(
+        "corrective-structure-profile",
+        structureDescription.label,
+        "Analysts usually separate zigzags and flats by Wave B depth, then confirm the family with Wave C behavior.",
+        structureType === "zigzag"
+          ? `Wave B depth and Wave C follow-through fit a zigzag profile with a likely directional continuation after the correction.`
+          : structureType === "flat"
+            ? `Wave B depth and Wave C behavior fit a regular flat profile.`
+            : structureType === "expanded-flat"
+              ? `Wave B depth and Wave C extension fit an expanded flat profile.`
+              : structureType === "running-flat"
+                ? `Wave B depth suggests a running flat profile, which often appears in strong trends.`
+                : "This ABC is valid, but the proportions do not strongly match a classic zigzag or flat family.",
+        structureScore >= 72
+          ? "pass"
+          : structureScore >= 45
+            ? "warning"
+            : "fail",
+        "soft",
+        structureScore,
       ),
     );
   }
 
   const fibonacciLevels = [
     ...markNearestFibLevel(
-      buildRetracementLevels(origin.price, waveA.price, [0.382, 0.5, 0.618, 0.786, 0.886], "Wave B"),
+      buildRetracementLevels(
+        origin.price,
+        waveA.price,
+        [0.5, 0.618, 0.764, 0.854, 0.886],
+        "Wave B",
+      ),
       waveB.price,
     ),
     ...markNearestFibLevel(
-      buildExtensionLevels(waveB.price, [1, 1.272, 1.618], waveA.price - origin.price, "Wave C"),
+      buildExtensionLevels(
+        waveB.price,
+        [...WAVEC_FIB_TARGETS],
+        waveA.price - origin.price,
+        "Wave C",
+      ),
       waveC.price,
     ),
   ];
@@ -2384,27 +2901,19 @@ function buildFutureProjection(
   probability: number,
 ) {
   if (count.pattern === "impulse") {
-    if (count.points.length >= 3 && count.points.length < 4) {
+    if (count.points.length === 3) {
       return buildWave4Projection(count, validation.measurements, probability);
     }
 
-    if (count.points.length >= 4 && count.points.length < 5) {
+    if (count.points.length >= 4) {
       return buildWave5Projection(count, validation.measurements, probability);
-    }
-
-    if (count.points.length >= 5) {
-      return buildPostImpulseProjection(count, probability);
     }
 
     return null;
   }
 
-  if (count.points.length >= 2 && count.points.length < 3) {
+  if (count.points.length >= 2) {
     return buildWaveCProjection(count, validation.measurements, probability);
-  }
-
-  if (count.points.length >= 3) {
-    return buildPostCorrectiveProjection(validation, probability);
   }
 
   return null;
@@ -2440,6 +2949,17 @@ export function validateWaveCount(count: WaveCount) {
   };
 }
 
+export function getWaveFutureProjection(count: WaveCount): FutureProjection | null {
+  const baseValidation = validateWaveCountBase(count);
+  const probability = calculateWaveProbabilityInternal(count, baseValidation);
+
+  if (probability <= 0 || !baseValidation.hardRulePassed) {
+    return null;
+  }
+
+  return buildFutureProjection(count, baseValidation, probability);
+}
+
 export function validateImpulseWave(points: WavePoint[], options: ValidateWaveOptions = {}) {
   const count = buildWaveCount(points, {
     pattern: "impulse",
@@ -2468,6 +2988,14 @@ function compareDetectedCandidates(
   left: AutoDetectedWaveCandidate,
   right: AutoDetectedWaveCandidate,
 ) {
+  if (left.selectionScore !== right.selectionScore) {
+    return right.selectionScore - left.selectionScore;
+  }
+
+  if (left.recencyScore !== right.recencyScore) {
+    return right.recencyScore - left.recencyScore;
+  }
+
   if (left.confidence !== right.confidence) {
     return right.confidence - left.confidence;
   }
@@ -2497,32 +3025,34 @@ function pickPatternCandidate(
   candidates: AutoDetectedWaveCandidate[],
   pattern: WavePatternType,
 ) {
+  const expectedPointLength = pattern === "impulse" ? 5 : 3;
   const patternCandidates = candidates.filter(
-    (candidate) => candidate.count.pattern === pattern,
+    (candidate) => candidate.count.pattern === pattern && candidate.validation.hardRulePassed,
   );
 
-  if (pattern === "impulse") {
-    const predictiveWave5Candidate = patternCandidates.find(
-      (candidate) =>
-        candidate.count.points.length >= 4 &&
-        candidate.futureProjection?.label === "Wave 5 Target Zone",
-    );
-
-    return predictiveWave5Candidate ?? patternCandidates[0] ?? null;
+  if (patternCandidates.length === 0) {
+    return null;
   }
 
-  const predictiveWaveCCandidate = patternCandidates.find(
-    (candidate) =>
-      candidate.count.points.length >= 2 &&
-      candidate.futureProjection?.label === "Wave C Objective",
+  return (
+    patternCandidates.find(
+      (candidate) =>
+        candidate.count.points.length === expectedPointLength && candidate.recencyScore >= 55,
+    ) ??
+    patternCandidates.find((candidate) => candidate.recencyScore >= 55) ??
+    patternCandidates.find(
+      (candidate) =>
+        candidate.count.points.length === expectedPointLength &&
+        candidate.validation.hardRulePassed,
+    ) ??
+    patternCandidates[0]
   );
-
-  return predictiveWaveCCandidate ?? patternCandidates[0] ?? null;
 }
 
 function buildDetectedCandidate(
   count: WaveCount,
   swingSet: ZigZagSwingSet,
+  latestCandleIndex: number,
 ) {
   const validation = validateWaveCount(count);
   const confidence = calculateWaveProbabilityInternal(count, validation);
@@ -2532,6 +3062,16 @@ function buildDetectedCandidate(
   }
 
   const futureProjection = buildFutureProjection(count, validation, confidence);
+  const endIndex = getWaveCountEndIndex(count);
+  const candlesFromLatest =
+    endIndex >= 0 && latestCandleIndex >= 0 ? Math.max(latestCandleIndex - endIndex, 0) : Number.MAX_SAFE_INTEGER;
+  const recencyScore = calculateCandidateRecencyScore(endIndex, latestCandleIndex);
+  const selectionScore = calculateCandidateSelectionScore(
+    count,
+    confidence,
+    recencyScore,
+    futureProjection,
+  );
   const scoredCount: WaveCount = {
     ...count,
     confidence,
@@ -2546,6 +3086,9 @@ function buildDetectedCandidate(
     },
     confidence,
     futureProjection,
+    recencyScore,
+    selectionScore,
+    candlesFromLatest,
     swings: swingSet.swings,
     deviationPercent: swingSet.deviationPercent,
     depth: swingSet.depth,
@@ -2559,6 +3102,7 @@ export function autoDetectWaveCount(
 ): AutoWaveDetection {
   const degree = options.degree ?? "minor";
   const patternPreference = options.pattern ?? "either";
+  const latestCandleIndex = candles.length - 1;
   const swingSets = collectZigZagSwingSets(candles, options);
   const rankedBySignature = new Map<string, AutoDetectedWaveCandidate>();
 
@@ -2575,7 +3119,7 @@ export function autoDetectWaveCount(
             continue;
           }
 
-          const candidate = buildDetectedCandidate(impulse, swingSet);
+          const candidate = buildDetectedCandidate(impulse, swingSet, latestCandleIndex);
 
           if (!candidate) {
             continue;
@@ -2584,7 +3128,7 @@ export function autoDetectWaveCount(
           const signature = buildCountSignature(candidate.count);
           const existing = rankedBySignature.get(signature);
 
-          if (!existing || candidate.confidence > existing.confidence) {
+          if (!existing || compareDetectedCandidates(candidate, existing) < 0) {
             rankedBySignature.set(signature, candidate);
           }
         }
@@ -2603,7 +3147,7 @@ export function autoDetectWaveCount(
             continue;
           }
 
-          const candidate = buildDetectedCandidate(corrective, swingSet);
+          const candidate = buildDetectedCandidate(corrective, swingSet, latestCandleIndex);
 
           if (!candidate) {
             continue;
@@ -2612,7 +3156,7 @@ export function autoDetectWaveCount(
           const signature = buildCountSignature(candidate.count);
           const existing = rankedBySignature.get(signature);
 
-          if (!existing || candidate.confidence > existing.confidence) {
+          if (!existing || compareDetectedCandidates(candidate, existing) < 0) {
             rankedBySignature.set(signature, candidate);
           }
         }

@@ -22,6 +22,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  buildWaveReactionAnalysis,
+  type ConfidenceLabel,
+  type ReactionValidationItem,
+  type WaveReactionAnalysis,
+} from "@/lib/elliottReactionEngine";
+import {
   CORRECTIVE_LABELS,
   sortWavePoints,
   type FibonacciLevel,
@@ -41,6 +47,8 @@ type WaveAnalysisPanelData = {
   activeCount: WaveCount | null;
   activeDirection: WaveTrend;
   validation: WaveValidationResult | null;
+  impulseValidation?: WaveValidationResult | null;
+  correctiveValidation?: WaveValidationResult | null;
 };
 
 export type WaveAnalysisPanelProps = {
@@ -95,17 +103,28 @@ function formatRatio(value?: number) {
   return `${value.toFixed(3)}x`;
 }
 
+function formatReactionWaveLabel(
+  currentWave: WaveReactionAnalysis["currentWave"] | null | undefined,
+) {
+  if (typeof currentWave === "number") {
+    return `Wave ${currentWave}`;
+  }
+
+  if (currentWave) {
+    return `Wave ${currentWave}`;
+  }
+
+  return "Wave Pending";
+}
+
 function buildHeadline(count: WaveCount | null) {
   if (!count || count.points.length === 0) {
     return "Awaiting wave placement";
   }
 
   const latestPoint = count.points[count.points.length - 1];
-  const wavePrefix = latestPoint.label === "A" || latestPoint.label === "B" || latestPoint.label === "C"
-    ? `Wave ${latestPoint.label}`
-    : `Wave ${latestPoint.label}`;
 
-  return `${wavePrefix} - ${capitalize(count.direction)} ${capitalize(count.pattern)}`;
+  return `Wave ${latestPoint.label} - ${capitalize(count.direction)} ${capitalize(count.pattern)}`;
 }
 
 function buildSubheadline(count: WaveCount | null) {
@@ -238,23 +257,24 @@ function getVisibleFibLevels(
     label: `${projection.label} ${projection.ratio?.toFixed(3) ?? ""}`.trim(),
     price: projection.price,
     ratio: projection.ratio ?? 0,
-    type: projection.label.includes("Wave 2") ||
+    type:
+      projection.label.includes("Wave 2") ||
       projection.label.includes("Wave 4") ||
       projection.label.includes("Wave A") ||
       projection.label.includes("Wave B")
-      ? "retracement"
-      : "extension",
+        ? "retracement"
+        : "extension",
     wave: projection.label,
     isActive: projection.emphasis === "primary",
   }));
 }
 
-function getConfidenceTone(score: number) {
-  if (score >= 85) {
+function getConfidenceTone(confidenceLabel?: ConfidenceLabel | null) {
+  if (confidenceLabel === "High") {
     return "text-emerald-300 border-emerald-400/20 bg-emerald-400/10";
   }
 
-  if (score >= 65) {
+  if (confidenceLabel === "Medium") {
     return "text-amber-200 border-amber-300/20 bg-amber-300/10";
   }
 
@@ -288,6 +308,34 @@ function pickNearestLevel(levels: FibonacciLevel[], currentPrice?: number) {
 
     return nextDistance < closestDistance ? level : closest;
   });
+}
+
+function getValidationTone(status: WaveRuleStatus) {
+  if (status === "pass") {
+    return "text-emerald-300";
+  }
+
+  if (status === "warning") {
+    return "text-amber-200";
+  }
+
+  return "text-rose-200";
+}
+
+function summarizeChecklist(items: ReactionValidationItem[]) {
+  if (items.length === 0) {
+    return "No checks yet";
+  }
+
+  const passCount = items.filter((item) => item.status === "pass").length;
+  const warningCount = items.filter((item) => item.status === "warning").length;
+  const failCount = items.filter((item) => item.status === "fail").length;
+
+  if (failCount > 0) {
+    return `${passCount} pass · ${warningCount} warning · ${failCount} fail`;
+  }
+
+  return `${passCount} pass${warningCount > 0 ? ` · ${warningCount} warning` : ""}`;
 }
 
 export function WaveAnalysisPanel({
@@ -324,11 +372,24 @@ export function WaveAnalysisPanel({
       return alternateValidation;
     }
 
-    return waveAnalysis?.validation ?? null;
-  }, [alternateCount, alternateValidation, useAlternateCount, waveAnalysis]);
+    if (!activeCount || !waveAnalysis) {
+      return null;
+    }
 
+    if (activeCount.pattern === "impulse") {
+      return waveAnalysis.impulseValidation ?? waveAnalysis.validation ?? null;
+    }
+
+    return waveAnalysis.correctiveValidation ?? waveAnalysis.validation ?? null;
+  }, [activeCount, alternateCount, alternateValidation, useAlternateCount, waveAnalysis]);
+
+  const reactionAnalysis = useMemo(
+    () => buildWaveReactionAnalysis(activeCount, activeValidation),
+    [activeCount, activeValidation],
+  );
+  const primaryZone = reactionAnalysis?.primaryZone ?? null;
+  const alternateZone = reactionAnalysis?.alternateZones[0] ?? null;
   const sortedWavePoints = useMemo(() => sortWavePoints(wavePoints), [wavePoints]);
-  const activeWaveLabel = activeCount?.points[activeCount.points.length - 1]?.label ?? null;
   const projectionTargets = useMemo(
     () => buildProjectionTargets(activeCount),
     [activeCount],
@@ -342,23 +403,28 @@ export function WaveAnalysisPanel({
     () => pickNearestLevel(fibLevels, currentPrice),
     [currentPrice, fibLevels],
   );
-
+  const activeWaveLabel = activeCount?.points[activeCount.points.length - 1]?.label ?? null;
+  const alternatePatternLabel = alternateCount ? capitalize(alternateCount.pattern) : "Alternate";
+  const isPatternComparison =
+    Boolean(activeCount && alternateCount) && activeCount?.pattern !== alternateCount?.pattern;
+  const hardRules = reactionAnalysis?.validation.hardRules ?? [];
+  const guidelines = reactionAnalysis?.validation.guidelines ?? [];
+  const ruleCount = hardRules.length + guidelines.length;
+  const confidencePercent = primaryZone ? Math.round(primaryZone.confidence * 100) : null;
+  const currentWaveLabel = formatReactionWaveLabel(reactionAnalysis?.currentWave);
+  const reactionLabel = reactionAnalysis
+    ? `${currentWaveLabel} ${capitalize(reactionAnalysis.reactionType)} Cluster`
+    : "Reaction zone pending";
   const handleAlternateToggle = () => {
     const nextValue = !useAlternateCount;
     setUseAlternateCount(nextValue);
     onToggleAlternateCount?.(nextValue);
   };
 
-  const ruleCount = activeValidation?.rules.length ?? 0;
-  const confidenceScore = Math.round(
-    activeValidation?.score ??
-      (typeof activeCount?.confidence === "number" ? activeCount.confidence * 100 : 0),
-  );
-
   return (
     <Card
       className={cn(
-        "flex h-full min-h-[620px] flex-col overflow-hidden border-white/8 bg-[linear-gradient(180deg,rgba(11,17,30,0.98),rgba(7,11,21,0.98))]",
+        "flex h-full min-h-[540px] flex-col overflow-hidden border-white/8 bg-[linear-gradient(180deg,rgba(11,17,30,0.98),rgba(7,11,21,0.98))]",
         className,
       )}
     >
@@ -376,19 +442,21 @@ export function WaveAnalysisPanel({
             </div>
             <CardTitle className="mt-3 text-lg">HareAssets Analysis Rail</CardTitle>
             <CardDescription className="mt-2 leading-6">
-              WaveBasis-style rule validation, Fibonacci confluence, and next-wave
-              targeting for Gold and Silver.
+              Reaction-zone scoring, Elliott rule validation, and deterministic
+              invalidation built from the current plotted pivots.
             </CardDescription>
           </div>
 
           <div className="flex flex-col items-end gap-2">
             <div
               className={cn(
-                "rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.12em]",
-                getConfidenceTone(confidenceScore),
+                "rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.08em]",
+                getConfidenceTone(primaryZone?.confidenceLabel ?? null),
               )}
             >
-              {confidenceScore}% confidence
+              {primaryZone
+                ? `${primaryZone.confidenceLabel} confidence${confidencePercent !== null ? ` · ${confidencePercent}%` : ""}`
+                : "Awaiting scored zone"}
             </div>
             <Button
               size="sm"
@@ -437,10 +505,13 @@ export function WaveAnalysisPanel({
 
             <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-2 text-right">
               <p className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
-                Latest Pivot
+                Live Context
               </p>
               <p className="mt-1 text-base font-semibold text-foreground">
-                {activeWaveLabel ? `Wave ${activeWaveLabel}` : "Not set"}
+                {reactionAnalysis ? currentWaveLabel : activeWaveLabel ? `Wave ${activeWaveLabel}` : "Not set"}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {reactionAnalysis ? capitalize(reactionAnalysis.reactionType) : "Waiting"}
               </p>
             </div>
           </div>
@@ -451,11 +522,14 @@ export function WaveAnalysisPanel({
                 <Layers3 className="mt-0.5 h-4 w-4 text-primary" />
                 <div>
                   <p className="text-sm font-medium text-foreground">
-                    Alternate wave count available
+                    {isPatternComparison
+                      ? `${alternatePatternLabel} count detected`
+                      : "Alternate wave count available"}
                   </p>
                   <p className="text-sm text-muted-foreground">
-                    Toggle between the primary and alternate count to compare
-                    projections.
+                    {isPatternComparison
+                      ? "Switch between the detected impulse and corrective structures to compare their rule checks and reaction zones."
+                      : "Toggle between the primary and alternate count to compare scenarios."}
                   </p>
                 </div>
               </div>
@@ -465,7 +539,9 @@ export function WaveAnalysisPanel({
                 className="h-8 px-3 text-xs"
                 onClick={handleAlternateToggle}
               >
-                {useAlternateCount ? "Using Alternate Count" : "Show Alternate Count"}
+                {useAlternateCount
+                  ? `Showing ${alternatePatternLabel}`
+                  : `Show ${alternatePatternLabel}`}
               </Button>
             </div>
           ) : null}
@@ -473,7 +549,7 @@ export function WaveAnalysisPanel({
 
         {activeTab === "analysis" ? (
           <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
                   {activeCount?.direction === "bearish" ? (
@@ -495,63 +571,277 @@ export function WaveAnalysisPanel({
 
               <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
+                  <Target className="h-4 w-4 text-primary" />
+                  <p className="text-sm font-medium text-foreground">Reaction Context</p>
+                </div>
+                <p className="mt-3 text-xl font-semibold text-foreground">
+                  {reactionAnalysis ? capitalize(reactionAnalysis.reactionType) : "Pending"}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {reactionAnalysis
+                    ? `${currentWaveLabel} is being scored as a ${reactionAnalysis.reactionType} zone.`
+                    : "Add more pivots to identify the next actionable reaction cluster."}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <div className="flex items-center gap-2">
                   <Radar className="h-4 w-4 text-primary" />
-                  <p className="text-sm font-medium text-foreground">Rule Coverage</p>
+                  <p className="text-sm font-medium text-foreground">Rule Validation</p>
                 </div>
                 <p className="mt-3 text-xl font-semibold text-foreground">
                   {ruleCount ? `${ruleCount} checks` : "No checks yet"}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {activeValidation
-                    ? activeValidation.hardRulePassed
-                      ? "Hard Elliott rules currently hold."
-                      : "One or more hard Elliott rules are broken."
-                    : "Complete a five-wave or ABC structure to lock the checklist."}
+                  {reactionAnalysis
+                    ? summarizeChecklist(hardRules)
+                    : "Complete more of the sequence to unlock the full Elliott checklist."}
                 </p>
               </div>
             </div>
 
-            <div className="space-y-3">
-              {(activeValidation?.rules ?? []).length > 0 ? (
-                activeValidation?.rules.map((rule) => (
-                  <div
-                    key={rule.id}
-                    className={cn(
-                      "rounded-2xl border p-4 transition-colors",
-                      getRuleRowTone(rule.status),
-                    )}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="text-lg leading-none">{STATUS_ICON[rule.status]}</div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-semibold text-foreground">
-                            {rule.label}
-                          </p>
-                          <Badge
-                            variant="outline"
-                            className="border-white/10 text-[10px] uppercase tracking-[0.16em] text-muted-foreground"
-                          >
-                            {rule.severity}
-                          </Badge>
-                        </div>
-                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                          {rule.message}
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-                          {rule.detail}
-                        </p>
-                      </div>
+            <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Target className="h-4 w-4 text-primary" />
+                    <p className="text-sm font-medium text-foreground">Primary Zone</p>
+                  </div>
+                  <p className="mt-2 text-base font-semibold text-foreground">
+                    {primaryZone ? reactionLabel : "Reaction zone pending"}
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {primaryZone
+                      ? primaryZone.reasonSummary
+                      : "The zone engine turns on once there is enough wave structure to score confluence."}
+                  </p>
+                </div>
+                {primaryZone ? (
+                  <Badge className={cn("border px-3 py-1 text-xs font-semibold", getConfidenceTone(primaryZone.confidenceLabel))}>
+                    {primaryZone.confidenceLabel}
+                  </Badge>
+                ) : null}
+              </div>
+
+              {primaryZone ? (
+                <>
+                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                        Zone Range
+                      </p>
+                      <p className="mt-2 text-base font-semibold text-foreground">
+                        ${formatPrice(primaryZone.low, pricePrecision)} - ${formatPrice(primaryZone.high, pricePrecision)}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {confidencePercent}% deterministic confidence
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                        Invalidation
+                      </p>
+                      <p className="mt-2 text-base font-semibold text-foreground">
+                        {reactionAnalysis?.invalidation
+                          ? `$${formatPrice(reactionAnalysis.invalidation.level, pricePrecision)}`
+                          : "Pending"}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {reactionAnalysis?.invalidation?.rule ?? "Waiting for enough structure to lock the invalidation rule."}
+                      </p>
                     </div>
                   </div>
-                ))
-              ) : (
-                <div className="rounded-2xl border border-dashed border-white/10 bg-white/3 p-5 text-sm leading-6 text-muted-foreground">
-                  Manual mode lets you place 1-2-3-4-5 and A-B-C pivots directly on
-                  the chart. Once a complete count is present, this panel will score
-                  it against Elliott Wave hard rules and Fibonacci preferences.
+
+                  {primaryZone.reasons.length > 0 ? (
+                    <div className="mt-4 rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                        Why This Zone Matters
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {primaryZone.reasons.map((reason) => (
+                          <div key={reason} className="flex items-start gap-2 text-sm text-muted-foreground">
+                            <ChevronRight className="mt-0.5 h-3.5 w-3.5 text-primary" />
+                            <span>{reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <details className="mt-4 rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
+                    <summary className="cursor-pointer list-none text-sm font-medium text-foreground">
+                      Score Explanation
+                    </summary>
+                    <div className="mt-3 space-y-2">
+                      {primaryZone.scoreBreakdown.map((entry) => (
+                        <div
+                          key={entry.label}
+                          className="flex items-center justify-between gap-3 rounded-xl border border-white/6 bg-black/10 px-3 py-2"
+                        >
+                          <span className="text-sm text-muted-foreground">{entry.label}</span>
+                          <span className="text-sm font-semibold text-foreground">
+                            {Math.round(entry.value * 100)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                </>
+              ) : null}
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <div className="flex items-center gap-2">
+                  <Layers3 className="h-4 w-4 text-primary" />
+                  <p className="text-sm font-medium text-foreground">Alternate Scenario</p>
                 </div>
-              )}
+                {alternateZone ? (
+                  <>
+                    <p className="mt-3 text-base font-semibold text-foreground">
+                      {alternateZone.label}
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      ${formatPrice(alternateZone.low, pricePrecision)} - ${formatPrice(alternateZone.high, pricePrecision)}
+                    </p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {alternateZone.confidenceLabel} confidence · {Math.round(alternateZone.confidence * 100)}%
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {alternateZone.reasonSummary}
+                    </p>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground/80">
+                      {alternateZone.invalidation?.explanation ?? "Use the same invalidation as the primary scenario until the count evolves."}
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                    The alternate scenario appears once the current count has at least one secondary confluence cluster worth tracking.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <div className="flex items-center gap-2">
+                  <RefreshCw className="h-4 w-4 text-primary" />
+                  <p className="text-sm font-medium text-foreground">Invalidation</p>
+                </div>
+                {reactionAnalysis?.invalidation ? (
+                  <>
+                    <p className="mt-3 text-base font-semibold text-foreground">
+                      ${formatPrice(reactionAnalysis.invalidation.level, pricePrecision)}
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {reactionAnalysis.invalidation.rule}
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground/80">
+                      {reactionAnalysis.invalidation.explanation}
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                    Invalidation becomes explicit once the next projected wave has enough context.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <div className="space-y-3">
+                <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                  <p className="text-sm font-medium text-foreground">Hard Rules</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    These are the non-negotiable Elliott rules for the active count.
+                  </p>
+                </div>
+
+                {hardRules.length > 0 ? (
+                  hardRules.map((rule) => (
+                    <div
+                      key={rule.label}
+                      className={cn(
+                        "rounded-2xl border p-4 transition-colors",
+                        getRuleRowTone(rule.status),
+                      )}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="text-lg leading-none">{STATUS_ICON[rule.status]}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-semibold text-foreground">{rule.label}</p>
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "border-white/10 text-[10px] uppercase tracking-[0.16em]",
+                                getValidationTone(rule.status),
+                              )}
+                            >
+                              {rule.status}
+                            </Badge>
+                          </div>
+                          {rule.detail ? (
+                            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                              {rule.detail}
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/3 p-5 text-sm leading-6 text-muted-foreground">
+                    Place more pivots to unlock the hard-rule checklist.
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                  <p className="text-sm font-medium text-foreground">Guidelines</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    These checks capture alternation, Fibonacci quality, and reaction-zone confluence.
+                  </p>
+                </div>
+
+                {guidelines.length > 0 ? (
+                  guidelines.map((rule) => (
+                    <div
+                      key={rule.label}
+                      className={cn(
+                        "rounded-2xl border p-4 transition-colors",
+                        getRuleRowTone(rule.status),
+                      )}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="text-lg leading-none">{STATUS_ICON[rule.status]}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-semibold text-foreground">{rule.label}</p>
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "border-white/10 text-[10px] uppercase tracking-[0.16em]",
+                                getValidationTone(rule.status),
+                              )}
+                            >
+                              {rule.status}
+                            </Badge>
+                          </div>
+                          {rule.detail ? (
+                            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                              {rule.detail}
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/3 p-5 text-sm leading-6 text-muted-foreground">
+                    Guideline checks appear once the count has enough structure to score fib and confluence quality.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         ) : null}
@@ -565,6 +855,11 @@ export function WaveAnalysisPanel({
                   ? `Nearest active level is ${nearestFibLevel.wave} at $${formatPrice(nearestFibLevel.price, pricePrecision)}.`
                   : "Complete more of the structure to lock in retracement and extension confluence."}
               </p>
+              {primaryZone ? (
+                <p className="mt-2 text-xs leading-5 text-muted-foreground/80">
+                  Primary reaction zone: ${formatPrice(primaryZone.low, pricePrecision)} - ${formatPrice(primaryZone.high, pricePrecision)} · {primaryZone.reasonSummary}
+                </p>
+              ) : null}
             </div>
 
             {fibLevels.length > 0 ? (
@@ -614,8 +909,7 @@ export function WaveAnalysisPanel({
               ))
             ) : (
               <div className="rounded-2xl border border-dashed border-white/10 bg-white/3 p-5 text-sm leading-6 text-muted-foreground">
-                Fibonacci targets will populate here after the current count has
-                enough pivots to define a measurable retracement or extension.
+                Fibonacci targets will populate here after the current count has enough pivots to define a measurable retracement or extension.
               </div>
             )}
           </div>
@@ -629,11 +923,54 @@ export function WaveAnalysisPanel({
                 <p className="text-sm font-medium text-foreground">Projected Next Wave</p>
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                {projectionTargets.length > 0
-                  ? "These targets are derived from the current count and classic Elliott Fibonacci relationships."
-                  : "Add more pivots to unlock the next-wave target stack."}
+                {primaryZone
+                  ? `${reactionLabel} is currently the preferred scenario. Confidence is derived from fib confluence, prior structure, channel alignment, round-number proximity, and rule quality.`
+                  : "Add more pivots to unlock the next-wave reaction zone."}
               </p>
             </div>
+
+            {primaryZone ? (
+              <div className="rounded-2xl border border-primary/20 bg-primary/10 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{reactionLabel}</p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      ${formatPrice(primaryZone.low, pricePrecision)} - ${formatPrice(primaryZone.high, pricePrecision)}
+                    </p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {primaryZone.reasonSummary}
+                    </p>
+                  </div>
+                  <Badge className={cn("border px-3 py-1 text-xs font-semibold", getConfidenceTone(primaryZone.confidenceLabel))}>
+                    {primaryZone.confidenceLabel}
+                  </Badge>
+                </div>
+              </div>
+            ) : null}
+
+            {alternateZone ? (
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <p className="text-sm font-semibold text-foreground">Alternate Scenario</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {alternateZone.label} · ${formatPrice(alternateZone.low, pricePrecision)} - ${formatPrice(alternateZone.high, pricePrecision)}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {alternateZone.confidenceLabel} confidence · {alternateZone.reasonSummary}
+                </p>
+              </div>
+            ) : null}
+
+            {reactionAnalysis?.invalidation ? (
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <p className="text-sm font-semibold text-foreground">Invalidation</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  ${formatPrice(reactionAnalysis.invalidation.level, pricePrecision)}
+                </p>
+                <p className="mt-1 text-sm leading-6 text-muted-foreground/80">
+                  {reactionAnalysis.invalidation.explanation}
+                </p>
+              </div>
+            ) : null}
 
             {projectionTargets.length > 0 ? (
               projectionTargets.map((target) => (
@@ -676,45 +1013,9 @@ export function WaveAnalysisPanel({
               ))
             ) : (
               <div className="rounded-2xl border border-dashed border-white/10 bg-white/3 p-5 text-sm leading-6 text-muted-foreground">
-                The projection engine uses the current anchor, completed swings, and
-                classic Elliott ratios such as 0.618, 1.000, and 1.618 to build the
-                next-wave target ladder.
+                The projection engine uses the current anchor, completed swings, and classic Elliott ratios such as 0.618, 1.000, and 1.618 to build the next-wave target ladder.
               </div>
             )}
-
-            {alternateCount ? (
-              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">
-                      Alternate wave count
-                    </p>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      Compare the alternate count’s projection ladder before placing
-                      the next label.
-                    </p>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant={useAlternateCount ? "default" : "outline"}
-                    className="h-8 px-3 text-xs"
-                    onClick={handleAlternateToggle}
-                  >
-                    {useAlternateCount ? (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        Primary Count
-                      </>
-                    ) : (
-                      <>
-                        <Layers3 className="h-3.5 w-3.5" />
-                        Alternate Count
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-            ) : null}
           </div>
         ) : null}
 
@@ -751,8 +1052,7 @@ export function WaveAnalysisPanel({
             )}
           </div>
           <p className="mt-3 text-xs leading-5 text-muted-foreground">
-            Data from Yahoo Finance. Wave overlays and validation are computed
-            locally inside HareAssets.
+            Data from Yahoo Finance. Wave overlays, reaction zones, and validation are computed locally inside HareAssets.
           </p>
         </div>
       </CardContent>

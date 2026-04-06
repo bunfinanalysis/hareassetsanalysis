@@ -7,6 +7,7 @@ import {
   CrosshairMode,
   LineStyle,
   createChart,
+  type AutoscaleInfo,
   type CandlestickData,
   type IChartApi,
   type ISeriesApi,
@@ -22,6 +23,7 @@ import {
   buildWaveCount,
   CORRECTIVE_LABELS,
   createWavePoint,
+  getWaveFutureProjection,
   IMPULSE_LABELS,
   sortWavePoints,
   validateWaveCount,
@@ -32,6 +34,11 @@ import {
   type WavePoint,
   type WaveTrend,
 } from "@/lib/elliottWaveUtils";
+import {
+  buildWaveReactionAnalysis,
+  type ConfidenceLabel,
+  type ReactionType,
+} from "@/lib/elliottReactionEngine";
 import { cn } from "@/lib/utils";
 import { METAL_SYMBOLS, type Candle, type MetalSymbolCode } from "@/lib/market-types";
 
@@ -52,6 +59,7 @@ type MetalChartProps = {
 };
 
 type InteractionMode = "manual" | "auto";
+type ManualWaveMode = "impulse" | "corrective";
 
 type OverlayWavePoint = {
   id: string;
@@ -73,12 +81,18 @@ type OverlayGeometry = {
   impulsePoints: OverlayWavePoint[];
   correctivePoints: OverlayWavePoint[];
   fibonacciLevels: Array<FibonacciLevel & { y: number }>;
-  probabilityZone: OverlayProbabilityZone | null;
+  probabilityZones: OverlayProbabilityZone[];
+  correctivePrediction: OverlayCorrectivePrediction | null;
+  retracementBarrier: OverlayRetracementBarrier | null;
 };
 
 type WaveAnalysis = {
   impulsePoints: WavePoint[];
   correctivePoints: WavePoint[];
+  impulseCount: WaveCount | null;
+  impulseValidation: ReturnType<typeof validateWaveCount> | null;
+  correctiveCount: WaveCount | null;
+  correctiveValidation: ReturnType<typeof validateWaveCount> | null;
   activePattern: WavePatternType | null;
   activeCount: WaveCount | null;
   activeDirection: WaveTrend;
@@ -90,17 +104,77 @@ export type MetalChartWaveAnalysis = WaveAnalysis;
 
 type ProbabilityZoneTarget = {
   id: string;
+  pattern: WavePatternType;
   label: string;
   priceLow: number;
   priceHigh: number;
   centerPrice: number;
   confidence: number;
+  confidenceLabel: ConfidenceLabel;
+  reactionType: ReactionType;
+  reasonSummary: string;
+  reasons: string[];
+  invalidationLevel?: number;
 };
 
 type OverlayProbabilityZone = ProbabilityZoneTarget & {
   topY: number;
   bottomY: number;
   centerY: number;
+};
+
+type CorrectivePredictionTarget = {
+  id: string;
+  label: string;
+  startTime: number;
+  startPrice: number;
+  targetPrice: number;
+  zoneLow: number;
+  zoneHigh: number;
+  confidence: number;
+  confidenceLabel: ConfidenceLabel;
+  reasonSummary: string;
+  reasons: string[];
+  invalidationLevel?: number;
+};
+
+type OverlayCorrectivePrediction = CorrectivePredictionTarget & {
+  startX: number;
+  startY: number;
+  targetX: number;
+  targetY: number;
+};
+
+type RetracementBarrierLevel = {
+  id: string;
+  ratio: number;
+  price: number;
+  label: string;
+  emphasis?: "primary" | "secondary";
+};
+
+type RetracementBarrierTarget = {
+  id: string;
+  kind: "resistance" | "support";
+  wave: string;
+  label: string;
+  priceLow: number;
+  priceHigh: number;
+  centerPrice: number;
+  confidence: number;
+  levels: RetracementBarrierLevel[];
+};
+
+type OverlayRetracementBarrier = Omit<RetracementBarrierTarget, "levels"> & {
+  topY: number;
+  bottomY: number;
+  centerY: number;
+  levels: Array<RetracementBarrierLevel & { y: number }>;
+};
+
+type OverlayPriceExtents = {
+  min: number;
+  max: number;
 };
 
 const IMPULSE_COLOR = "#3b82f6";
@@ -114,7 +188,9 @@ const EMPTY_OVERLAY: OverlayGeometry = {
   impulsePoints: [],
   correctivePoints: [],
   fibonacciLevels: [],
-  probabilityZone: null,
+  probabilityZones: [],
+  correctivePrediction: null,
+  retracementBarrier: null,
 };
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -211,23 +287,19 @@ function inferAnchorFromCandles(
   };
 }
 
-function getNextLogicalLabel(points: WavePoint[]): WaveLabel {
+function getNextManualLabel(
+  points: WavePoint[],
+  manualWaveMode: ManualWaveMode,
+): WaveLabel {
   const sortedPoints = sortWavePoints(points);
-  const correctivePoints = sortedPoints.filter((point) => isCorrectiveLabel(point.label));
+  const labels = manualWaveMode === "corrective" ? CORRECTIVE_LABELS : IMPULSE_LABELS;
+  const patternPoints = sortedPoints.filter((point) =>
+    manualWaveMode === "corrective"
+      ? isCorrectiveLabel(point.label)
+      : isImpulseLabel(point.label),
+  );
 
-  if (correctivePoints.length > 0) {
-    return correctivePoints.length < CORRECTIVE_LABELS.length
-      ? CORRECTIVE_LABELS[correctivePoints.length]
-      : IMPULSE_LABELS[0];
-  }
-
-  const impulsePoints = sortedPoints.filter((point) => isImpulseLabel(point.label));
-
-  if (impulsePoints.length < IMPULSE_LABELS.length) {
-    return IMPULSE_LABELS[impulsePoints.length];
-  }
-
-  return CORRECTIVE_LABELS[0];
+  return patternPoints.length < labels.length ? labels[patternPoints.length] : labels[0];
 }
 
 function getNearestCandleByX(
@@ -358,23 +430,88 @@ function buildWaveAnalysis(
   const sortedPoints = sortWavePoints(wavePoints);
   const impulsePoints = sortedPoints.filter((point) => isImpulseLabel(point.label));
   const correctivePoints = sortedPoints.filter((point) => isCorrectiveLabel(point.label));
-  const activePattern: WavePatternType | null =
-    correctivePoints.length > 0
-      ? "corrective"
-      : impulsePoints.length > 0
-        ? "impulse"
-        : null;
+  const latestImpulsePoint = impulsePoints[impulsePoints.length - 1];
+  const latestCorrectivePoint = correctivePoints[correctivePoints.length - 1];
+  const activePattern: WavePatternType | null = (() => {
+    if (!latestImpulsePoint && !latestCorrectivePoint) {
+      return null;
+    }
+
+    if (!latestCorrectivePoint) {
+      return "impulse";
+    }
+
+    if (!latestImpulsePoint) {
+      return "corrective";
+    }
+
+    if (latestCorrectivePoint.time !== latestImpulsePoint.time) {
+      return latestCorrectivePoint.time > latestImpulsePoint.time
+        ? "corrective"
+        : "impulse";
+    }
+
+    return correctivePoints.length > impulsePoints.length ? "corrective" : "impulse";
+  })();
 
   if (!activePattern) {
     return {
       impulsePoints,
       correctivePoints,
+      impulseCount: null,
+      impulseValidation: null,
+      correctiveCount: null,
+      correctiveValidation: null,
       activePattern: null,
       activeCount: null,
       activeDirection: "bullish",
       validation: null,
     };
   }
+
+  const impulseDirection = inferDirectionFromSequence(impulsePoints);
+  const impulseAnchor =
+    impulsePoints.length > 0
+      ? inferAnchorFromCandles(impulsePoints, candles, impulseDirection)
+      : undefined;
+  const impulseCount =
+    impulsePoints.length > 0
+      ? buildWaveCount(impulsePoints, {
+          pattern: "impulse",
+          direction: impulseDirection,
+          degree: impulsePoints[0]?.degree ?? "minor",
+          source: impulsePoints[0]?.source ?? interactionMode,
+          anchor: impulseAnchor,
+        })
+      : null;
+  const impulseValidation =
+    impulseCount && impulsePoints.length >= 3 ? validateWaveCount(impulseCount) : null;
+
+  const correctiveDirection = inferDirectionFromSequence(correctivePoints);
+  const correctiveAnchor =
+    correctivePoints.length === CORRECTIVE_LABELS.length &&
+    impulsePoints.length === IMPULSE_LABELS.length
+      ? {
+          id: `carry-over-anchor-${impulsePoints[impulsePoints.length - 1].id}`,
+          price: impulsePoints[impulsePoints.length - 1].price,
+          time: impulsePoints[impulsePoints.length - 1].time,
+          kind: correctiveDirection === "bullish" ? ("low" as const) : ("high" as const),
+        }
+      : correctivePoints.length > 0
+        ? inferAnchorFromCandles(correctivePoints, candles, correctiveDirection)
+        : undefined;
+  const correctiveCount =
+    correctivePoints.length > 0
+      ? buildWaveCount(correctivePoints, {
+          pattern: "corrective",
+          direction: correctiveDirection,
+          degree: correctivePoints[0]?.degree ?? "minor",
+          source: correctivePoints[0]?.source ?? interactionMode,
+          anchor: correctiveAnchor,
+        })
+      : null;
+  const correctiveValidation =
+    correctiveCount && correctivePoints.length >= 2 ? validateWaveCount(correctiveCount) : null;
 
   const activePoints = activePattern === "corrective" ? correctivePoints : impulsePoints;
   const activeDirection = inferDirectionFromSequence(activePoints);
@@ -402,6 +539,10 @@ function buildWaveAnalysis(
   return {
     impulsePoints,
     correctivePoints,
+    impulseCount,
+    impulseValidation,
+    correctiveCount,
+    correctiveValidation,
     activePattern,
     activeCount,
     activeDirection,
@@ -497,9 +638,16 @@ function toConfidenceScore(
 
 function createProbabilityZoneTarget(
   id: string,
+  pattern: WavePatternType,
   label: string,
   values: [number, number],
   confidence: number,
+  metadata?: Partial<
+    Pick<
+      ProbabilityZoneTarget,
+      "confidenceLabel" | "reactionType" | "reasonSummary" | "reasons" | "invalidationLevel"
+    >
+  >,
 ): ProbabilityZoneTarget | null {
   const [firstValue, secondValue] = values;
 
@@ -512,15 +660,284 @@ function createProbabilityZoneTarget(
 
   return {
     id,
+    pattern,
     label,
     priceLow,
     priceHigh,
     centerPrice: (priceLow + priceHigh) / 2,
     confidence,
+    confidenceLabel: metadata?.confidenceLabel ?? "Low",
+    reactionType: metadata?.reactionType ?? "resistance",
+    reasonSummary: metadata?.reasonSummary ?? "Measured projection",
+    reasons: metadata?.reasons ?? [],
+    invalidationLevel: metadata?.invalidationLevel,
   };
 }
 
-function buildProbabilityZoneTarget(
+function formatOverlayPrice(price: number) {
+  const decimals = price >= 100 ? 2 : 3;
+  return price.toFixed(decimals);
+}
+
+function truncateOverlayText(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
+
+function buildReactionZoneTarget(
+  count: WaveCount | null,
+  validation: ReturnType<typeof validateWaveCount> | null,
+) {
+  const reactionAnalysis = buildWaveReactionAnalysis(count, validation);
+
+  if (!count || !reactionAnalysis?.primaryZone) {
+    return null;
+  }
+
+  const currentWaveLabel =
+    typeof reactionAnalysis.currentWave === "number"
+      ? `Wave ${reactionAnalysis.currentWave}`
+      : `Wave ${reactionAnalysis.currentWave}`;
+  const zoneLabel = `${currentWaveLabel} ${reactionAnalysis.reactionType === "support" ? "Support Cluster" : "Resistance Cluster"}`;
+
+  return createProbabilityZoneTarget(
+    `${count.anchor?.id ?? count.points[0]?.id ?? count.pattern}-${String(reactionAnalysis.currentWave)}-reaction-zone`,
+    count.pattern,
+    zoneLabel,
+    [reactionAnalysis.primaryZone.low, reactionAnalysis.primaryZone.high],
+    reactionAnalysis.primaryZone.confidence * 100,
+    {
+      confidenceLabel: reactionAnalysis.primaryZone.confidenceLabel,
+      reactionType: reactionAnalysis.reactionType,
+      reasonSummary: reactionAnalysis.primaryZone.reasonSummary,
+      reasons: reactionAnalysis.primaryZone.reasons,
+      invalidationLevel: reactionAnalysis.invalidation?.level,
+    },
+  );
+}
+
+function getConfidenceLabelFromProbability(probability: number): ConfidenceLabel {
+  if (probability >= 74) {
+    return "High";
+  }
+
+  if (probability >= 52) {
+    return "Medium";
+  }
+
+  return "Low";
+}
+
+function buildCorrectivePredictionTarget(
+  count: WaveCount | null,
+  validation: ReturnType<typeof validateWaveCount> | null,
+) {
+  if (!count || count.pattern !== "corrective" || count.points.length !== 2) {
+    return null;
+  }
+
+  const points = sortWavePoints(count.points);
+  const waveBPoint = points[1];
+  const futureProjection = getWaveFutureProjection(count);
+
+  if (!waveBPoint || !futureProjection) {
+    return null;
+  }
+
+  const reactionAnalysis = buildWaveReactionAnalysis(count, validation);
+  const probability = futureProjection.probability;
+
+  return {
+    id: `${count.anchor?.id ?? waveBPoint.id}-wave-c-prediction`,
+    label: "Predicted Wave C",
+    startTime: waveBPoint.time,
+    startPrice: waveBPoint.price,
+    targetPrice: futureProjection.nextTargetPrice,
+    zoneLow: futureProjection.minTarget,
+    zoneHigh: futureProjection.maxTarget,
+    confidence: probability,
+    confidenceLabel:
+      reactionAnalysis?.primaryZone?.confidenceLabel ??
+      getConfidenceLabelFromProbability(probability),
+    reasonSummary:
+      reactionAnalysis?.primaryZone?.reasonSummary ?? "Wave C objective confluence",
+    reasons: reactionAnalysis?.primaryZone?.reasons ?? [],
+    invalidationLevel: reactionAnalysis?.invalidation?.level,
+  } satisfies CorrectivePredictionTarget;
+}
+
+function getProbabilityZoneColors(pattern: WavePatternType) {
+  return pattern === "impulse"
+    ? {
+        fill: "rgba(59, 130, 246, 0.12)",
+        stroke: "rgba(96, 165, 250, 0.34)",
+        line: "rgba(147, 197, 253, 0.58)",
+        labelText: "#93c5fd",
+        valueText: "#bfdbfe",
+        labelStroke: "rgba(96, 165, 250, 0.32)",
+        valueStroke: "rgba(96, 165, 250, 0.26)",
+      }
+    : {
+        fill: "rgba(234, 179, 8, 0.12)",
+        stroke: "rgba(250, 204, 21, 0.34)",
+        line: "rgba(253, 224, 71, 0.56)",
+        labelText: "#fde047",
+        valueText: "#fef08a",
+        labelStroke: "rgba(250, 204, 21, 0.32)",
+        valueStroke: "rgba(250, 204, 21, 0.26)",
+      };
+}
+
+function buildOverlayPriceExtents(
+  wavePoints: WavePoint[],
+  probabilityZoneTargets: ProbabilityZoneTarget[],
+  correctivePredictionTarget: CorrectivePredictionTarget | null,
+  retracementBarrierTarget: RetracementBarrierTarget | null,
+  validations: Array<ReturnType<typeof validateWaveCount> | null>,
+): OverlayPriceExtents | null {
+  const prices = [
+    ...wavePoints.map((point) => point.price),
+    ...probabilityZoneTargets.flatMap((zone) => [zone.priceLow, zone.priceHigh]),
+    ...(correctivePredictionTarget
+      ? [
+          correctivePredictionTarget.startPrice,
+          correctivePredictionTarget.targetPrice,
+          correctivePredictionTarget.zoneLow,
+          correctivePredictionTarget.zoneHigh,
+          ...(typeof correctivePredictionTarget.invalidationLevel === "number"
+            ? [correctivePredictionTarget.invalidationLevel]
+            : []),
+        ]
+      : []),
+    ...(retracementBarrierTarget
+      ? [
+          retracementBarrierTarget.priceLow,
+          retracementBarrierTarget.priceHigh,
+          ...retracementBarrierTarget.levels.map((level) => level.price),
+        ]
+      : []),
+    ...validations.flatMap((validation) =>
+      validation?.fibonacciLevels.map((level) => level.price) ?? [],
+    ),
+  ].filter((price): price is number => Number.isFinite(price));
+
+  if (prices.length === 0) {
+    return null;
+  }
+
+  return {
+    min: Math.min(...prices),
+    max: Math.max(...prices),
+  };
+}
+
+function buildRetracementBarrierLevels(
+  startPrice: number,
+  endPrice: number,
+  ratios: number[],
+  wave: string,
+) {
+  const move = endPrice - startPrice;
+
+  return ratios.map<RetracementBarrierLevel>((ratio, index) => ({
+    id: `${wave}-barrier-${ratio}`,
+    ratio,
+    price: endPrice - move * ratio,
+    label: `${(ratio * 100).toFixed(1)}% (${formatOverlayPrice(endPrice - move * ratio)})`,
+    emphasis:
+      Math.abs(ratio - 0.618) < 0.001 || Math.abs(ratio - 0.786) < 0.001
+        ? "primary"
+        : index === ratios.length - 1
+          ? "primary"
+          : "secondary",
+  }));
+}
+
+function createRetracementBarrierTarget(
+  id: string,
+  kind: "resistance" | "support",
+  wave: string,
+  label: string,
+  levels: RetracementBarrierLevel[],
+  bandRatios: [number, number],
+  confidence: number,
+): RetracementBarrierTarget | null {
+  const lowerLevel = levels.find((level) => Math.abs(level.ratio - bandRatios[0]) < 0.001);
+  const upperLevel = levels.find((level) => Math.abs(level.ratio - bandRatios[1]) < 0.001);
+
+  if (!lowerLevel || !upperLevel) {
+    return null;
+  }
+
+  const priceLow = Math.min(lowerLevel.price, upperLevel.price);
+  const priceHigh = Math.max(lowerLevel.price, upperLevel.price);
+
+  return {
+    id,
+    kind,
+    wave,
+    label,
+    priceLow,
+    priceHigh,
+    centerPrice: (priceLow + priceHigh) / 2,
+    confidence,
+    levels,
+  };
+}
+
+function getRetracementBarrierConfig(
+  count: WaveCount,
+  pointLength: number,
+): {
+  levels: number[];
+  bandRatios: [number, number];
+  label: string;
+} | null {
+  if (count.pattern === "impulse" && pointLength <= 2) {
+    return count.direction === "bearish"
+      ? {
+          levels: [0.382, 0.5, 0.618, 0.786, 0.854],
+          bandRatios: [0.618, 0.786],
+          label: "Wave 2 Resistance Cluster",
+        }
+      : {
+          levels: [0.382, 0.5, 0.618, 0.786],
+          bandRatios: [0.382, 0.618],
+          label: "Wave 2 Support Cluster",
+        };
+  }
+
+  if (count.pattern === "impulse" && pointLength <= 4) {
+    return count.direction === "bearish"
+      ? {
+          levels: [0.146, 0.236, 0.382, 0.5],
+          bandRatios: [0.236, 0.382],
+          label: "Wave 4 Resistance Cluster",
+        }
+      : {
+          levels: [0.146, 0.236, 0.382],
+          bandRatios: [0.146, 0.382],
+          label: "Wave 4 Support Cluster",
+        };
+  }
+
+  if (count.pattern === "corrective" && pointLength <= 2) {
+    return count.direction === "bearish"
+      ? {
+          levels: [0.382, 0.5, 0.618, 0.786, 0.886],
+          bandRatios: [0.618, 0.786],
+          label: "Wave B Resistance Cluster",
+        }
+      : {
+          levels: [0.382, 0.5, 0.618, 0.786, 0.886],
+          bandRatios: [0.5, 0.618],
+          label: "Wave B Support Cluster",
+        };
+  }
+
+  return null;
+}
+
+function buildRetracementBarrierTarget(
   count: WaveCount | null,
   validation: ReturnType<typeof validateWaveCount> | null,
 ) {
@@ -530,117 +947,67 @@ function buildProbabilityZoneTarget(
 
   const points = sortWavePoints(count.points);
   const confidence = toConfidenceScore(count, validation);
+  const barrierConfig = getRetracementBarrierConfig(count, points.length);
+
+  if (!barrierConfig) {
+    return null;
+  }
 
   if (count.pattern === "impulse") {
-    if (points.length === 1) {
-      const wave1Move = points[0].price - count.anchor.price;
+    if (points.length <= 2) {
+      const levels = buildRetracementBarrierLevels(
+        count.anchor.price,
+        points[0].price,
+        barrierConfig.levels,
+        "Wave 2",
+      );
 
-      return createProbabilityZoneTarget(
-        `${count.anchor.id}-wave2-zone`,
-        "Wave 2 Retracement",
-        [
-          points[0].price - wave1Move * 0.786,
-          points[0].price - wave1Move * 0.382,
-        ],
+      return createRetracementBarrierTarget(
+        `${count.anchor.id}-wave2-${count.direction}-barrier`,
+        count.direction === "bearish" ? "resistance" : "support",
+        "Wave 2",
+        barrierConfig.label,
+        levels,
+        barrierConfig.bandRatios,
         confidence,
       );
     }
 
-    if (points.length === 2) {
-      const wave1Move = points[0].price - count.anchor.price;
+    if (points.length <= 4) {
+      const levels = buildRetracementBarrierLevels(
+        points[1].price,
+        points[2].price,
+        barrierConfig.levels,
+        "Wave 4",
+      );
 
-      return createProbabilityZoneTarget(
-        `${count.anchor.id}-wave3-zone`,
-        "Primary Target Zone",
-        [
-          points[1].price + wave1Move * 1.272,
-          points[1].price + wave1Move * 1.618,
-        ],
+      return createRetracementBarrierTarget(
+        `${count.anchor.id}-wave4-${count.direction}-barrier`,
+        count.direction === "bearish" ? "resistance" : "support",
+        "Wave 4",
+        barrierConfig.label,
+        levels,
+        barrierConfig.bandRatios,
         confidence,
       );
     }
-
-    if (points.length === 3) {
-      const wave3Move = points[2].price - points[1].price;
-
-      return createProbabilityZoneTarget(
-        `${count.anchor.id}-wave4-zone`,
-        "Wave 4 Retracement",
-        [
-          points[2].price - wave3Move * 0.5,
-          points[2].price - wave3Move * 0.236,
-        ],
-        confidence,
-      );
-    }
-
-    if (points.length === 4) {
-      const wave1Move = points[0].price - count.anchor.price;
-
-      return createProbabilityZoneTarget(
-        `${count.anchor.id}-wave5-zone`,
-        "Primary Target Zone",
-        [
-          points[3].price + wave1Move * 0.618,
-          points[3].price + wave1Move,
-        ],
-        confidence,
-      );
-    }
-
-    const fullImpulseMove = points[4].price - count.anchor.price;
-
-    return createProbabilityZoneTarget(
-      `${count.anchor.id}-wavea-zone`,
-      "Primary Target Zone",
-      [
-        points[4].price - fullImpulseMove * 0.382,
-        points[4].price - fullImpulseMove * 0.236,
-      ],
-      confidence,
-    );
   }
 
-  if (points.length === 1) {
-    const waveAMove = points[0].price - count.anchor.price;
-
-    return createProbabilityZoneTarget(
-      `${count.anchor.id}-waveb-zone`,
-      "Wave B Retracement",
-      [
-        points[0].price - waveAMove * 0.886,
-        points[0].price - waveAMove * 0.382,
-      ],
-      confidence,
+  if (count.pattern === "corrective" && points.length <= 2) {
+    const levels = buildRetracementBarrierLevels(
+      count.anchor.price,
+      points[0].price,
+      barrierConfig.levels,
+      "Wave B",
     );
-  }
 
-  if (points.length === 2) {
-    const waveAMove = points[0].price - count.anchor.price;
-
-    return createProbabilityZoneTarget(
-      `${count.anchor.id}-wavec-zone`,
-      "Wave C Objective",
-      [
-        points[1].price + waveAMove,
-        points[1].price + waveAMove * 1.618,
-      ],
-      confidence,
-    );
-  }
-
-  if (validation?.fibonacciLevels.length) {
-    const activeLevel =
-      validation.fibonacciLevels.find((level) => level.isActive) ??
-      validation.fibonacciLevels[0];
-
-    return createProbabilityZoneTarget(
-      `${count.anchor.id}-postc-zone`,
-      "Post-C Reversal Zone",
-      [
-        activeLevel.price * 0.9985,
-        activeLevel.price * 1.0015,
-      ],
+    return createRetracementBarrierTarget(
+      `${count.anchor.id}-waveb-${count.direction}-barrier`,
+      count.direction === "bearish" ? "resistance" : "support",
+      "Wave B",
+      barrierConfig.label,
+      levels,
+      barrierConfig.bandRatios,
       confidence,
     );
   }
@@ -648,31 +1015,14 @@ function buildProbabilityZoneTarget(
   return null;
 }
 
-function pickProbabilityZoneTarget(
-  primary: ProbabilityZoneTarget | null,
-  alternate: ProbabilityZoneTarget | null,
-) {
-  if (!primary) {
-    return alternate;
-  }
-
-  if (!alternate) {
-    return primary;
-  }
-
-  if (alternate.confidence > primary.confidence + 4) {
-    return alternate;
-  }
-
-  return primary;
-}
-
 function buildOverlayGeometry(
   chart: IChartApi,
   series: ISeriesApi<"Candlestick", Time>,
   container: HTMLDivElement,
   analysis: WaveAnalysis,
-  probabilityZoneTarget: ProbabilityZoneTarget | null,
+  probabilityZoneTargets: ProbabilityZoneTarget[],
+  correctivePredictionTarget: CorrectivePredictionTarget | null,
+  retracementBarrierTarget: RetracementBarrierTarget | null,
 ) {
   const chartHeight = container.clientHeight;
   const impulseDirection = inferDirectionFromSequence(analysis.impulsePoints);
@@ -711,14 +1061,81 @@ function buildOverlayGeometry(
     })
     .filter((level): level is FibonacciLevel & { y: number } => level !== null),
   );
-  const probabilityZone = (() => {
-    if (!probabilityZoneTarget) {
+  const probabilityZones = probabilityZoneTargets
+    .map<OverlayProbabilityZone | null>((probabilityZoneTarget) => {
+      const upperCoordinate = series.priceToCoordinate(probabilityZoneTarget.priceHigh);
+      const lowerCoordinate = series.priceToCoordinate(probabilityZoneTarget.priceLow);
+      const centerCoordinate = series.priceToCoordinate(probabilityZoneTarget.centerPrice);
+
+      if (
+        upperCoordinate === null ||
+        lowerCoordinate === null ||
+        centerCoordinate === null
+      ) {
+        return null;
+      }
+
+      const topY = Math.min(Number(upperCoordinate), Number(lowerCoordinate));
+      const bottomY = Math.max(Number(upperCoordinate), Number(lowerCoordinate));
+      const minBandHeight = 18;
+      const centerY = Number(centerCoordinate);
+
+      return {
+        ...probabilityZoneTarget,
+        topY:
+          bottomY - topY < minBandHeight ? centerY - minBandHeight / 2 : topY,
+        bottomY:
+          bottomY - topY < minBandHeight ? centerY + minBandHeight / 2 : bottomY,
+        centerY,
+      };
+    })
+    .filter((zone): zone is OverlayProbabilityZone => zone !== null)
+    .sort((left, right) => {
+      if (left.pattern !== right.pattern) {
+        return left.pattern === "impulse" ? -1 : 1;
+      }
+
+      return right.confidence - left.confidence;
+    });
+  const correctivePrediction = (() => {
+    if (!correctivePredictionTarget) {
       return null;
     }
 
-    const upperCoordinate = series.priceToCoordinate(probabilityZoneTarget.priceHigh);
-    const lowerCoordinate = series.priceToCoordinate(probabilityZoneTarget.priceLow);
-    const centerCoordinate = series.priceToCoordinate(probabilityZoneTarget.centerPrice);
+    const startX = chart.timeScale().timeToCoordinate(
+      correctivePredictionTarget.startTime as UTCTimestamp,
+    );
+    const startY = series.priceToCoordinate(correctivePredictionTarget.startPrice);
+    const targetY = series.priceToCoordinate(correctivePredictionTarget.targetPrice);
+
+    if (startX === null || startY === null || targetY === null) {
+      return null;
+    }
+
+    const width = container.clientWidth;
+    const resolvedStartX = Number(startX);
+    const targetX = clamp(
+      Math.max(resolvedStartX + 96, width - 92),
+      resolvedStartX + 48,
+      Math.max(width - 26, resolvedStartX + 48),
+    );
+
+    return {
+      ...correctivePredictionTarget,
+      startX: resolvedStartX,
+      startY: Number(startY),
+      targetX,
+      targetY: Number(targetY),
+    };
+  })();
+  const retracementBarrier = (() => {
+    if (!retracementBarrierTarget) {
+      return null;
+    }
+
+    const upperCoordinate = series.priceToCoordinate(retracementBarrierTarget.priceHigh);
+    const lowerCoordinate = series.priceToCoordinate(retracementBarrierTarget.priceLow);
+    const centerCoordinate = series.priceToCoordinate(retracementBarrierTarget.centerPrice);
 
     if (
       upperCoordinate === null ||
@@ -728,18 +1145,34 @@ function buildOverlayGeometry(
       return null;
     }
 
+    const levels = retracementBarrierTarget.levels
+      .map((level) => {
+        const y = series.priceToCoordinate(level.price);
+
+        if (y === null) {
+          return null;
+        }
+
+        return {
+          ...level,
+          y: Number(y),
+        };
+      })
+      .filter((level): level is RetracementBarrierLevel & { y: number } => level !== null);
+
     const topY = Math.min(Number(upperCoordinate), Number(lowerCoordinate));
     const bottomY = Math.max(Number(upperCoordinate), Number(lowerCoordinate));
     const minBandHeight = 18;
     const centerY = Number(centerCoordinate);
 
     return {
-      ...probabilityZoneTarget,
+      ...retracementBarrierTarget,
       topY:
         bottomY - topY < minBandHeight ? centerY - minBandHeight / 2 : topY,
       bottomY:
         bottomY - topY < minBandHeight ? centerY + minBandHeight / 2 : bottomY,
       centerY,
+      levels,
     };
   })();
 
@@ -749,7 +1182,9 @@ function buildOverlayGeometry(
     impulsePoints,
     correctivePoints,
     fibonacciLevels,
-    probabilityZone,
+    probabilityZones,
+    correctivePrediction,
+    retracementBarrier,
   };
 }
 
@@ -775,12 +1210,30 @@ function buildGeometryFingerprint(geometry: OverlayGeometry) {
       Math.round(level.y),
       level.isActive ? 1 : 0,
     ]),
-    probabilityZone: geometry.probabilityZone
+    probabilityZones: geometry.probabilityZones.map((zone) => [
+      zone.id,
+      zone.pattern,
+      zone.label,
+      Math.round(zone.topY),
+      Math.round(zone.bottomY),
+    ]),
+    correctivePrediction: geometry.correctivePrediction
       ? [
-          geometry.probabilityZone.id,
-          geometry.probabilityZone.label,
-          Math.round(geometry.probabilityZone.topY),
-          Math.round(geometry.probabilityZone.bottomY),
+          geometry.correctivePrediction.id,
+          Math.round(geometry.correctivePrediction.startX),
+          Math.round(geometry.correctivePrediction.startY),
+          Math.round(geometry.correctivePrediction.targetX),
+          Math.round(geometry.correctivePrediction.targetY),
+        ]
+      : null,
+    retracementBarrier: geometry.retracementBarrier
+      ? [
+          geometry.retracementBarrier.id,
+          geometry.retracementBarrier.kind,
+          geometry.retracementBarrier.wave,
+          Math.round(geometry.retracementBarrier.topY),
+          Math.round(geometry.retracementBarrier.bottomY),
+          ...geometry.retracementBarrier.levels.map((level) => Math.round(level.y)),
         ]
       : null,
   });
@@ -811,24 +1264,22 @@ function buildLineSegments(points: OverlayWavePoint[]) {
 }
 
 function buildWaveAnalysisSignature(analysis: WaveAnalysis) {
-  return JSON.stringify({
-    activePattern: analysis.activePattern,
-    activeDirection: analysis.activeDirection,
-    activeCount: analysis.activeCount
+  const serializeCount = (count: WaveCount | null) =>
+    count
       ? {
-          pattern: analysis.activeCount.pattern,
-          direction: analysis.activeCount.direction,
-          degree: analysis.activeCount.degree,
-          source: analysis.activeCount.source,
-          confidence: analysis.activeCount.confidence,
-          anchor: analysis.activeCount.anchor
+          pattern: count.pattern,
+          direction: count.direction,
+          degree: count.degree,
+          source: count.source,
+          confidence: count.confidence,
+          anchor: count.anchor
             ? {
-                time: analysis.activeCount.anchor.time,
-                price: analysis.activeCount.anchor.price,
-                kind: analysis.activeCount.anchor.kind,
+                time: count.anchor.time,
+                price: count.anchor.price,
+                kind: count.anchor.kind,
               }
             : null,
-          points: analysis.activeCount.points.map((point) => ({
+          points: count.points.map((point) => ({
             id: point.id,
             label: point.label,
             time: point.time,
@@ -836,27 +1287,85 @@ function buildWaveAnalysisSignature(analysis: WaveAnalysis) {
             source: point.source,
           })),
         }
-      : null,
-    validation: analysis.validation
+      : null;
+  const serializeValidation = (validation: ReturnType<typeof validateWaveCount> | null) =>
+    validation
       ? {
-          pattern: analysis.validation.pattern,
-          direction: analysis.validation.direction,
-          isValid: analysis.validation.isValid,
-          hardRulePassed: analysis.validation.hardRulePassed,
-          score: analysis.validation.score,
-          rules: analysis.validation.rules.map((rule) => ({
+          pattern: validation.pattern,
+          direction: validation.direction,
+          isValid: validation.isValid,
+          hardRulePassed: validation.hardRulePassed,
+          score: validation.score,
+          rules: validation.rules.map((rule) => ({
             id: rule.id,
             status: rule.status,
             message: rule.message,
           })),
-          fibonacciLevels: analysis.validation.fibonacciLevels.map((level) => ({
+          fibonacciLevels: validation.fibonacciLevels.map((level) => ({
             id: level.id,
             price: level.price,
             isActive: level.isActive,
           })),
         }
-      : null,
+      : null;
+
+  return JSON.stringify({
+    activePattern: analysis.activePattern,
+    activeDirection: analysis.activeDirection,
+    activeCount: serializeCount(analysis.activeCount),
+    impulseCount: serializeCount(analysis.impulseCount),
+    correctiveCount: serializeCount(analysis.correctiveCount),
+    validation: serializeValidation(analysis.validation),
+    impulseValidation: serializeValidation(analysis.impulseValidation),
+    correctiveValidation: serializeValidation(analysis.correctiveValidation),
   });
+}
+
+function buildAutoDetectedWavePoints(detection: ReturnType<typeof autoDetectWaveCount>) {
+  const detectedCounts = [detection.impulseCount, detection.correctiveCount].filter(
+    (count): count is WaveCount => count !== null,
+  );
+  const selectedCounts = detectedCounts.length > 0 ? detectedCounts : detection.count ? [detection.count] : [];
+
+  return sortWavePoints(
+    selectedCounts.flatMap((count) =>
+      count.points.map((point) =>
+        createWavePoint({
+          ...point,
+          source: "auto",
+        }),
+      ),
+    ),
+  );
+}
+
+function pickCompanionDetectedCandidate(
+  detection: ReturnType<typeof autoDetectWaveCount>,
+): {
+  count: WaveCount | null;
+  validation: ReturnType<typeof validateWaveCount> | null;
+} {
+  if (detection.correctiveCount && detection.impulseCount) {
+    return {
+      count: detection.impulseCount,
+      validation: detection.impulseValidation ?? validateWaveCount(detection.impulseCount),
+    };
+  }
+
+  const activePattern = detection.correctiveCount
+    ? "corrective"
+    : detection.impulseCount
+      ? "impulse"
+      : detection.count?.pattern ?? null;
+  const companionCandidate =
+    detection.rankedCounts.find((candidate) => candidate.count.pattern !== activePattern) ??
+    detection.rankedCounts[1] ??
+    null;
+
+  return {
+    count: companionCandidate?.count ?? null,
+    validation: companionCandidate?.validation ?? null,
+  };
 }
 
 export function MetalChart({
@@ -882,6 +1391,8 @@ export function MetalChart({
   const candlesRef = useRef(candles);
   const initialSymbolRef = useRef(symbol);
   const [internalInteractionMode, setInternalInteractionMode] = useState<InteractionMode>("manual");
+  const [manualWaveMode, setManualWaveMode] = useState<ManualWaveMode>("impulse");
+  const [showCorrectivePrediction, setShowCorrectivePrediction] = useState(false);
   const [internalWavePoints, setInternalWavePoints] = useState<WavePoint[]>([]);
   const [alternateWaveCount, setAlternateWaveCount] = useState<WaveCount | null>(null);
   const [alternateWaveValidation, setAlternateWaveValidation] =
@@ -896,6 +1407,9 @@ export function MetalChart({
   const onInteractionModeChangeRef = useRef(onInteractionModeChange);
   const onWaveAnalysisChangeRef = useRef(onWaveAnalysisChange);
   const onAlternateCountChangeRef = useRef(onAlternateCountChange);
+  const handleChartClickRef = useRef<
+    ((param: MouseEventParams<Time>) => void) | null
+  >(null);
   const publishedWaveAnalysisSignatureRef = useRef<string | null>(null);
   const isWavePointsControlled = controlledWavePoints !== undefined;
   const isInteractionModeControlled = controlledInteractionMode !== undefined;
@@ -979,23 +1493,148 @@ export function MetalChart({
     () => buildWaveAnalysis(wavePoints, candles, interactionMode),
     [candles, interactionMode, wavePoints],
   );
-  const probabilityZoneTarget = useMemo(() => {
-    const primaryZone = buildProbabilityZoneTarget(
-      waveAnalysis.activeCount,
-      waveAnalysis.validation,
-    );
-    const alternateZone = buildProbabilityZoneTarget(
-      alternateWaveCount,
-      alternateWaveValidation,
-    );
+  const probabilityZoneTargets = useMemo(() => {
+    if (interactionMode !== "manual") {
+      return [];
+    }
 
-    return pickProbabilityZoneTarget(primaryZone, alternateZone);
+    const activeManualCount =
+      manualWaveMode === "impulse"
+        ? waveAnalysis.impulseCount
+        : waveAnalysis.correctiveCount;
+    const activeManualValidation =
+      manualWaveMode === "impulse"
+        ? waveAnalysis.impulseValidation
+        : waveAnalysis.correctiveValidation;
+    const zones = [
+      buildReactionZoneTarget(activeManualCount, activeManualValidation),
+    ].filter((zone): zone is ProbabilityZoneTarget => zone !== null);
+
+    return Array.from(
+      new Map(
+        zones.map((zone) => [`${zone.pattern}-${Math.round(zone.priceLow * 1000)}-${Math.round(zone.priceHigh * 1000)}`, zone]),
+      ).values(),
+    );
+  }, [
+    interactionMode,
+    manualWaveMode,
+    waveAnalysis.correctiveCount,
+    waveAnalysis.correctiveValidation,
+    waveAnalysis.impulseCount,
+    waveAnalysis.impulseValidation,
+  ]);
+  const availableCorrectivePredictionTarget = useMemo(
+    () =>
+      buildCorrectivePredictionTarget(
+        waveAnalysis.correctiveCount,
+        waveAnalysis.correctiveValidation,
+      ),
+    [waveAnalysis.correctiveCount, waveAnalysis.correctiveValidation],
+  );
+  const correctivePredictionTarget = useMemo(() => {
+    if (
+      !showCorrectivePrediction ||
+      interactionMode !== "manual" ||
+      manualWaveMode !== "corrective"
+    ) {
+      return null;
+    }
+
+    return availableCorrectivePredictionTarget;
+  }, [
+    availableCorrectivePredictionTarget,
+    interactionMode,
+    manualWaveMode,
+    showCorrectivePrediction,
+  ]);
+  const retracementBarrierTarget = useMemo(() => {
+    if (interactionMode === "manual") {
+      return null;
+    }
+
+    const currentPrice =
+      candles[candles.length - 1]?.close ??
+      waveAnalysis.activeCount?.points[waveAnalysis.activeCount.points.length - 1]?.price ??
+      null;
+    const candidates = [
+      buildRetracementBarrierTarget(
+        waveAnalysis.impulseCount,
+        waveAnalysis.impulseValidation,
+      ),
+      buildRetracementBarrierTarget(
+        waveAnalysis.correctiveCount,
+        waveAnalysis.correctiveValidation,
+      ),
+      buildRetracementBarrierTarget(
+        alternateWaveCount,
+        alternateWaveValidation,
+      ),
+    ].filter((target): target is RetracementBarrierTarget => target !== null);
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const resistanceCandidates = candidates.filter(
+      (candidate) =>
+        candidate.kind === "resistance" &&
+        (typeof currentPrice !== "number" || candidate.centerPrice >= currentPrice * 0.995),
+    );
+    const rankedCandidates =
+      resistanceCandidates.length > 0 ? resistanceCandidates : candidates;
+
+    return rankedCandidates.sort((left, right) => {
+      const leftDistance =
+        typeof currentPrice === "number" ? Math.abs(left.centerPrice - currentPrice) : 0;
+      const rightDistance =
+        typeof currentPrice === "number" ? Math.abs(right.centerPrice - currentPrice) : 0;
+
+      if (left.kind !== right.kind) {
+        return left.kind === "resistance" ? -1 : 1;
+      }
+
+      if (leftDistance !== rightDistance) {
+        return leftDistance - rightDistance;
+      }
+
+      return right.confidence - left.confidence;
+    })[0] ?? null;
   }, [
     alternateWaveCount,
     alternateWaveValidation,
+    candles,
+    interactionMode,
     waveAnalysis.activeCount,
-    waveAnalysis.validation,
+    waveAnalysis.correctiveCount,
+    waveAnalysis.correctiveValidation,
+    waveAnalysis.impulseCount,
+    waveAnalysis.impulseValidation,
   ]);
+  const overlayPriceExtents = useMemo(
+    () =>
+      buildOverlayPriceExtents(
+        wavePoints,
+        probabilityZoneTargets,
+        correctivePredictionTarget,
+        retracementBarrierTarget,
+        [
+          waveAnalysis.validation,
+          waveAnalysis.impulseValidation,
+          waveAnalysis.correctiveValidation,
+          alternateWaveValidation,
+        ],
+      ),
+    [
+      alternateWaveValidation,
+      correctivePredictionTarget,
+      probabilityZoneTargets,
+      retracementBarrierTarget,
+      waveAnalysis.correctiveValidation,
+      waveAnalysis.impulseValidation,
+      waveAnalysis.validation,
+      wavePoints,
+    ],
+  );
 
   useEffect(() => {
     const nextSignature = buildWaveAnalysisSignature(waveAnalysis);
@@ -1037,33 +1676,27 @@ export function MetalChart({
       pattern: "either",
     });
 
-    if (!detection.count) {
+    const nextWavePoints = buildAutoDetectedWavePoints(detection);
+
+    if (nextWavePoints.length === 0) {
       return;
     }
 
     updateInteractionMode("auto");
-    updateWavePoints(
-      sortWavePoints(
-        detection.count.points.map((point) =>
-          createWavePoint({
-            ...point,
-            source: "auto",
-          }),
-        ),
-      ),
-    );
-    const nextAlternateCandidate = detection.rankedCounts[1] ?? null;
-    setAlternateWaveCount(nextAlternateCandidate?.count ?? null);
-    setAlternateWaveValidation(nextAlternateCandidate?.validation ?? null);
-    publishAlternateCount(
-      nextAlternateCandidate?.count ?? null,
-      nextAlternateCandidate?.validation ?? null,
-    );
+    setShowCorrectivePrediction(false);
+    updateWavePoints(nextWavePoints);
+
+    const companionCandidate = pickCompanionDetectedCandidate(detection);
+
+    setAlternateWaveCount(companionCandidate.count);
+    setAlternateWaveValidation(companionCandidate.validation);
+    publishAlternateCount(companionCandidate.count, companionCandidate.validation);
   }, [publishAlternateCount, updateInteractionMode, updateWavePoints]);
 
   const handleClearWaves = useCallback(() => {
     updateWavePoints([]);
     updateInteractionMode("manual");
+    setShowCorrectivePrediction(false);
     setDraggingPointId(null);
     dragPointIdRef.current = null;
     resetAlternateCount();
@@ -1087,9 +1720,23 @@ export function MetalChart({
 
       resetAlternateCount();
       updateWavePoints((currentPoints) => {
-        const nextLabel = getNextLogicalLabel(currentPoints);
-        const shouldReset = nextLabel === "1";
-        const basePoints = shouldReset ? [] : currentPoints;
+        const nextLabel = getNextManualLabel(currentPoints, manualWaveMode);
+        const selectedPatternIsCorrective = manualWaveMode === "corrective";
+        const selectedPatternPoints = currentPoints.filter((point) =>
+          selectedPatternIsCorrective
+            ? isCorrectiveLabel(point.label)
+            : isImpulseLabel(point.label),
+        );
+        const shouldReset =
+          selectedPatternPoints.length >=
+          (selectedPatternIsCorrective ? CORRECTIVE_LABELS.length : IMPULSE_LABELS.length);
+        const basePoints = shouldReset
+          ? currentPoints.filter((point) =>
+              selectedPatternIsCorrective
+                ? !isCorrectiveLabel(point.label)
+                : !isImpulseLabel(point.label),
+            )
+          : currentPoints;
 
         return sortWavePoints([
           ...basePoints,
@@ -1103,8 +1750,16 @@ export function MetalChart({
         ]);
       });
     },
-    [projectInteractionPoint, resetAlternateCount, updateWavePoints],
+    [manualWaveMode, projectInteractionPoint, resetAlternateCount, updateWavePoints],
   );
+
+  useEffect(() => {
+    handleChartClickRef.current = handleChartClick;
+  }, [handleChartClick]);
+
+  const handleChartClickProxy = useCallback((param: MouseEventParams<Time>) => {
+    handleChartClickRef.current?.(param);
+  }, []);
 
   const handlePointerMove = useCallback(
     (event: PointerEvent) => {
@@ -1166,10 +1821,25 @@ export function MetalChart({
     updateWavePoints([]);
     setOverlayGeometry(EMPTY_OVERLAY);
     updateInteractionMode("manual");
+    setShowCorrectivePrediction(false);
     resetAlternateCount();
     dragPointIdRef.current = null;
     setDraggingPointId(null);
   }, [resetAlternateCount, symbol, timeframeLabel, updateInteractionMode, updateWavePoints]);
+
+  useEffect(() => {
+    if (
+      interactionMode !== "manual" ||
+      manualWaveMode !== "corrective" ||
+      !availableCorrectivePredictionTarget
+    ) {
+      setShowCorrectivePrediction(false);
+    }
+  }, [
+    availableCorrectivePredictionTarget,
+    interactionMode,
+    manualWaveMode,
+  ]);
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -1253,7 +1923,7 @@ export function MetalChart({
       lastValueVisible: true,
     });
 
-    chart.subscribeClick(handleChartClick);
+    chart.subscribeClick(handleChartClickProxy);
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
@@ -1274,14 +1944,14 @@ export function MetalChart({
     resizeObserverRef.current.observe(containerRef.current);
 
     return () => {
-      chart.unsubscribeClick(handleChartClick);
+      chart.unsubscribeClick(handleChartClickProxy);
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
       candleSeriesRef.current = null;
       chart.remove();
       chartRef.current = null;
     };
-  }, [handleChartClick]);
+  }, [handleChartClickProxy]);
 
   useEffect(() => {
     if (!candleSeriesRef.current || candles.length === 0) {
@@ -1315,6 +1985,53 @@ export function MetalChart({
   }, [candles, symbol, timeframeLabel]);
 
   useEffect(() => {
+    if (!candleSeriesRef.current) {
+      return;
+    }
+
+    const minMove = METAL_SYMBOLS[symbol].minMove;
+
+    candleSeriesRef.current.applyOptions({
+      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
+        const base = original();
+
+        if (!overlayPriceExtents) {
+          return base;
+        }
+
+        const baseRange = base?.priceRange;
+
+        if (
+          baseRange &&
+          overlayPriceExtents.min >= baseRange.minValue &&
+          overlayPriceExtents.max <= baseRange.maxValue
+        ) {
+          return base;
+        }
+
+        const nextMin = Math.min(
+          baseRange?.minValue ?? overlayPriceExtents.min,
+          overlayPriceExtents.min,
+        );
+        const nextMax = Math.max(
+          baseRange?.maxValue ?? overlayPriceExtents.max,
+          overlayPriceExtents.max,
+        );
+        const rangeSize = Math.max(nextMax - nextMin, minMove * 8);
+        const padding = Math.max(rangeSize * 0.06, minMove * 24);
+
+        return {
+          priceRange: {
+            minValue: nextMin - padding,
+            maxValue: nextMax + padding,
+          },
+          margins: base?.margins,
+        };
+      },
+    });
+  }, [overlayPriceExtents, symbol]);
+
+  useEffect(() => {
     if (!chartRef.current || !candleSeriesRef.current || !containerRef.current) {
       return;
     }
@@ -1322,13 +2039,17 @@ export function MetalChart({
     if (
       wavePoints.length === 0 &&
       (waveAnalysis.validation?.fibonacciLevels.length ?? 0) === 0 &&
-      !probabilityZoneTarget
+      probabilityZoneTargets.length === 0 &&
+      !correctivePredictionTarget &&
+      !retracementBarrierTarget
     ) {
       setOverlayGeometry((currentGeometry) =>
         currentGeometry.impulsePoints.length === 0 &&
         currentGeometry.correctivePoints.length === 0 &&
         currentGeometry.fibonacciLevels.length === 0 &&
-        currentGeometry.probabilityZone === null
+        currentGeometry.probabilityZones.length === 0 &&
+        currentGeometry.correctivePrediction === null &&
+        currentGeometry.retracementBarrier === null
           ? currentGeometry
           : EMPTY_OVERLAY,
       );
@@ -1347,7 +2068,9 @@ export function MetalChart({
         candleSeriesRef.current,
         containerRef.current,
         waveAnalysis,
-        probabilityZoneTarget,
+        probabilityZoneTargets,
+        correctivePredictionTarget,
+        retracementBarrierTarget,
       );
       const nextFingerprint = buildGeometryFingerprint(nextGeometry);
 
@@ -1391,7 +2114,13 @@ export function MetalChart({
         overlayAnimationFrameRef.current = null;
       }
     };
-  }, [probabilityZoneTarget, waveAnalysis, wavePoints.length]);
+  }, [
+    correctivePredictionTarget,
+    probabilityZoneTargets,
+    retracementBarrierTarget,
+    waveAnalysis,
+    wavePoints.length,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -1416,7 +2145,7 @@ export function MetalChart({
         : "No Waves";
 
   return (
-    <div className="relative flex h-full min-h-[520px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+    <div className="relative flex h-full min-h-[460px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0">
       <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 py-2.5">
         <div>
           <p className="text-[11px] uppercase tracking-[0.34em] text-muted-foreground">
@@ -1432,19 +2161,33 @@ export function MetalChart({
         <div className="flex items-center rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl">
           <Button
             size="sm"
-            variant={interactionMode === "manual" ? "default" : "ghost"}
-            className={cn("h-8 px-3 text-xs", interactionMode !== "manual" && "text-muted-foreground")}
-            onClick={() => updateInteractionMode("manual")}
+            variant={interactionMode === "manual" && manualWaveMode === "impulse" ? "default" : "ghost"}
+            className={cn(
+              "h-8 px-3 text-xs",
+              !(interactionMode === "manual" && manualWaveMode === "impulse") &&
+                "text-muted-foreground",
+            )}
+            onClick={() => {
+              setManualWaveMode("impulse");
+              updateInteractionMode("manual");
+            }}
           >
-            Manual
+            Manual 5-Wave
           </Button>
           <Button
             size="sm"
-            variant={interactionMode === "auto" ? "default" : "ghost"}
-            className={cn("h-8 px-3 text-xs", interactionMode !== "auto" && "text-muted-foreground")}
-            onClick={() => updateInteractionMode("auto")}
+            variant={interactionMode === "manual" && manualWaveMode === "corrective" ? "default" : "ghost"}
+            className={cn(
+              "h-8 px-3 text-xs",
+              !(interactionMode === "manual" && manualWaveMode === "corrective") &&
+                "text-muted-foreground",
+            )}
+            onClick={() => {
+              setManualWaveMode("corrective");
+              updateInteractionMode("manual");
+            }}
           >
-            Auto
+            Manual 3-Wave
           </Button>
         </div>
 
@@ -1457,6 +2200,23 @@ export function MetalChart({
           Auto-Detect Waves
         </Button>
 
+        {interactionMode === "manual" && manualWaveMode === "corrective" ? (
+          <Button
+            size="sm"
+            variant={showCorrectivePrediction ? "default" : "outline"}
+            className={cn(
+              "h-8 px-3 text-xs",
+              !availableCorrectivePredictionTarget && "opacity-50",
+            )}
+            disabled={!availableCorrectivePredictionTarget}
+            onClick={() =>
+              setShowCorrectivePrediction((currentValue) => !currentValue)
+            }
+          >
+            {showCorrectivePrediction ? "Hide Wave C Forecast" : "Predict Wave C"}
+          </Button>
+        ) : null}
+
         <Button
           size="sm"
           variant="outline"
@@ -1468,7 +2228,12 @@ export function MetalChart({
       </div>
 
       <div className="pointer-events-none absolute left-4 top-14 z-20 rounded-xl border border-white/8 bg-[rgba(6,11,21,0.76)] px-3 py-1.5 text-[10px] uppercase tracking-[0.22em] text-muted-foreground shadow-[0_16px_40px_rgba(0,0,0,0.16)] backdrop-blur-xl">
-        {activeWaveLabel} · {interactionMode === "manual" ? "Click To Plot" : "Auto Overlay"}
+        {activeWaveLabel} ·{" "}
+        {interactionMode === "manual"
+          ? manualWaveMode === "impulse"
+            ? "Click To Plot 5-Wave"
+            : "Click To Plot 3-Wave"
+          : "Auto Overlay"}
       </div>
 
       <div className="absolute inset-x-0 bottom-0 top-12 overflow-hidden">
@@ -1482,50 +2247,277 @@ export function MetalChart({
             viewBox={`0 0 ${overlayGeometry.width} ${overlayGeometry.height}`}
             preserveAspectRatio="none"
           >
-          {overlayGeometry.probabilityZone ? (
+          {overlayGeometry.probabilityZones.map((zone) => (
+            <g key={zone.id}>
+              {(() => {
+                const colors = getProbabilityZoneColors(zone.pattern);
+                const labelBoxY = Math.max(12, zone.topY - 35);
+                const labelBoxWidth = 198;
+                const labelBoxHeight = 34;
+                const labelBoxX = Math.max(12, overlayGeometry.width - labelBoxWidth - 12);
+                const tooltipLines = [
+                  zone.label,
+                  `Confidence: ${zone.confidenceLabel} (${Math.round(zone.confidence)}%)`,
+                  zone.reasonSummary,
+                  ...zone.reasons,
+                  zone.invalidationLevel
+                    ? `Invalidation: ${formatOverlayPrice(zone.invalidationLevel)}`
+                    : null,
+                ]
+                  .filter((line): line is string => Boolean(line))
+                  .join("\n");
+
+                return (
+                  <>
+                    <title>{tooltipLines}</title>
+                    <rect
+                      x={10}
+                      y={zone.topY}
+                      width={Math.max(overlayGeometry.width - 20, 0)}
+                      height={Math.max(zone.bottomY - zone.topY, 14)}
+                      rx={8}
+                      fill={colors.fill}
+                      stroke={colors.stroke}
+                      strokeWidth={1.05}
+                    />
+                    <line
+                      x1={16}
+                      y1={zone.centerY}
+                      x2={overlayGeometry.width - 158}
+                      y2={zone.centerY}
+                      stroke={colors.line}
+                      strokeDasharray="4 5"
+                      strokeWidth={1}
+                    />
+                    <rect
+                      x={labelBoxX}
+                      y={labelBoxY}
+                      width={labelBoxWidth}
+                      height={labelBoxHeight}
+                      rx={9}
+                      fill="rgba(12, 18, 31, 0.92)"
+                      stroke={colors.labelStroke}
+                    />
+                    <text
+                      x={labelBoxX + labelBoxWidth / 2}
+                      y={labelBoxY + 11}
+                      fill={colors.labelText}
+                      fontSize="9.1"
+                      fontWeight="700"
+                      textAnchor="middle"
+                    >
+                      {truncateOverlayText(zone.label, 28)}
+                    </text>
+                    <text
+                      x={labelBoxX + labelBoxWidth / 2}
+                      y={labelBoxY + 21}
+                      fill={colors.valueText}
+                      fontSize="8.9"
+                      fontWeight="600"
+                      textAnchor="middle"
+                    >
+                      {`Confidence: ${zone.confidenceLabel}`}
+                    </text>
+                    <text
+                      x={labelBoxX + labelBoxWidth / 2}
+                      y={labelBoxY + 30}
+                      fill={colors.valueText}
+                      fontSize="8.35"
+                      fontWeight="500"
+                      textAnchor="middle"
+                    >
+                      {truncateOverlayText(zone.reasonSummary, 34)}
+                    </text>
+                  </>
+                );
+              })()}
+            </g>
+          ))}
+
+          {overlayGeometry.retracementBarrier ? (
             <g>
               <rect
                 x={10}
-                y={overlayGeometry.probabilityZone.topY}
+                y={overlayGeometry.retracementBarrier.topY}
                 width={Math.max(overlayGeometry.width - 20, 0)}
                 height={Math.max(
-                  overlayGeometry.probabilityZone.bottomY -
-                    overlayGeometry.probabilityZone.topY,
+                  overlayGeometry.retracementBarrier.bottomY -
+                    overlayGeometry.retracementBarrier.topY,
                   12,
                 )}
                 rx={8}
-                fill="rgba(249, 115, 22, 0.18)"
-                stroke="rgba(249, 115, 22, 0.34)"
-                strokeWidth={1.1}
+                fill="rgba(239, 68, 68, 0.1)"
+                stroke="rgba(248, 113, 113, 0.24)"
+                strokeWidth={1.05}
               />
-              <line
-                x1={10}
-                y1={overlayGeometry.probabilityZone.centerY}
-                x2={overlayGeometry.width - 10}
-                y2={overlayGeometry.probabilityZone.centerY}
-                stroke="rgba(249, 115, 22, 0.58)"
-                strokeDasharray="5 7"
-                strokeWidth={1.2}
-              />
+              {overlayGeometry.retracementBarrier.levels.map((level) => (
+                <g key={level.id}>
+                  <line
+                    x1={16}
+                    y1={level.y}
+                    x2={overlayGeometry.width - 118}
+                    y2={level.y}
+                    stroke={
+                      level.emphasis === "primary"
+                        ? "rgba(252, 165, 165, 0.72)"
+                        : "rgba(248, 113, 113, 0.48)"
+                    }
+                    strokeDasharray={level.emphasis === "primary" ? "4 5" : "3 6"}
+                    strokeWidth={level.emphasis === "primary" ? 1.15 : 0.95}
+                  />
+                  <text
+                    x={overlayGeometry.width - 108}
+                    y={level.y - 3}
+                    fill={level.emphasis === "primary" ? "#fca5a5" : "#fda4af"}
+                    fontSize="8.9"
+                    fontWeight={level.emphasis === "primary" ? "700" : "600"}
+                    textAnchor="start"
+                  >
+                    {level.label}
+                  </text>
+                </g>
+              ))}
               <rect
-                x={Math.max(12, overlayGeometry.width - 156)}
-                y={overlayGeometry.probabilityZone.centerY - 9}
-                width={144}
+                x={Math.max(12, overlayGeometry.width - 174)}
+                y={overlayGeometry.retracementBarrier.topY - 11}
+                width={162}
                 height={18}
                 rx={9}
                 fill="rgba(12, 18, 31, 0.9)"
-                stroke="rgba(249, 115, 22, 0.28)"
+                stroke="rgba(248, 113, 113, 0.28)"
               />
               <text
-                x={overlayGeometry.width - 84}
-                y={overlayGeometry.probabilityZone.centerY + 3}
-                fill="#fdba74"
-                fontSize="9.5"
-                fontWeight="600"
+                x={overlayGeometry.width - 93}
+                y={overlayGeometry.retracementBarrier.topY + 1}
+                fill="#fca5a5"
+                fontSize="9.3"
+                fontWeight="700"
                 textAnchor="middle"
               >
-                {overlayGeometry.probabilityZone.label}
+                {overlayGeometry.retracementBarrier.label}
               </text>
+            </g>
+          ) : null}
+
+          {overlayGeometry.correctivePrediction ? (
+            <g>
+              {(() => {
+                const prediction = overlayGeometry.correctivePrediction;
+                const zoneTopY = Math.min(prediction.targetY, prediction.startY) - 20;
+                const labelWidth = 188;
+                const labelHeight = 42;
+                const labelX = clamp(
+                  prediction.targetX - labelWidth / 2,
+                  12,
+                  Math.max(overlayGeometry.width - labelWidth - 12, 12),
+                );
+                const labelY = clamp(
+                  zoneTopY - 50,
+                  12,
+                  Math.max(overlayGeometry.height - labelHeight - 12, 12),
+                );
+                const bandTopPrice = Math.max(prediction.zoneLow, prediction.zoneHigh);
+                const bandBottomPrice = Math.min(prediction.zoneLow, prediction.zoneHigh);
+                const bandTopCoordinate = candleSeriesRef.current?.priceToCoordinate(
+                  bandTopPrice,
+                );
+                const bandBottomCoordinate = candleSeriesRef.current?.priceToCoordinate(
+                  bandBottomPrice,
+                );
+                const bandTopY =
+                  bandTopCoordinate === null || bandBottomCoordinate === null
+                    ? prediction.targetY - 12
+                    : Math.min(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+                const bandBottomY =
+                  bandTopCoordinate === null || bandBottomCoordinate === null
+                    ? prediction.targetY + 12
+                    : Math.max(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+                const tooltipLines = [
+                  prediction.label,
+                  `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
+                  `Confidence: ${prediction.confidenceLabel} (${Math.round(prediction.confidence)}%)`,
+                  prediction.reasonSummary,
+                  ...prediction.reasons,
+                  prediction.invalidationLevel
+                    ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
+                    : null,
+                ]
+                  .filter((line): line is string => Boolean(line))
+                  .join("\n");
+
+                return (
+                  <>
+                    <title>{tooltipLines}</title>
+                    <rect
+                      x={prediction.startX + 10}
+                      y={bandTopY}
+                      width={Math.max(prediction.targetX - prediction.startX - 20, 48)}
+                      height={Math.max(bandBottomY - bandTopY, 16)}
+                      rx={8}
+                      fill="rgba(234, 179, 8, 0.1)"
+                      stroke="rgba(250, 204, 21, 0.28)"
+                      strokeWidth={1}
+                    />
+                    <line
+                      x1={prediction.startX}
+                      y1={prediction.startY}
+                      x2={prediction.targetX}
+                      y2={prediction.targetY}
+                      stroke="rgba(250, 204, 21, 0.82)"
+                      strokeWidth={1.8}
+                      strokeDasharray="5 6"
+                      strokeLinecap="round"
+                    />
+                    <circle
+                      cx={prediction.targetX}
+                      cy={prediction.targetY}
+                      r={5}
+                      fill="#06111f"
+                      stroke="#fde047"
+                      strokeWidth={1.8}
+                    />
+                    <rect
+                      x={labelX}
+                      y={labelY}
+                      width={labelWidth}
+                      height={labelHeight}
+                      rx={10}
+                      fill="rgba(12, 18, 31, 0.92)"
+                      stroke="rgba(250, 204, 21, 0.26)"
+                    />
+                    <text
+                      x={labelX + labelWidth / 2}
+                      y={labelY + 13}
+                      fill="#fde047"
+                      fontSize="9.4"
+                      fontWeight="700"
+                      textAnchor="middle"
+                    >
+                      {prediction.label}
+                    </text>
+                    <text
+                      x={labelX + labelWidth / 2}
+                      y={labelY + 24}
+                      fill="#fef08a"
+                      fontSize="8.9"
+                      fontWeight="600"
+                      textAnchor="middle"
+                    >
+                      {`Confidence: ${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}%`}
+                    </text>
+                    <text
+                      x={labelX + labelWidth / 2}
+                      y={labelY + 35}
+                      fill="#fde68a"
+                      fontSize="8.25"
+                      fontWeight="500"
+                      textAnchor="middle"
+                    >
+                      {truncateOverlayText(prediction.reasonSummary, 34)}
+                    </text>
+                  </>
+                );
+              })()}
             </g>
           ) : null}
 
