@@ -1,4 +1,9 @@
 import { type Candle } from "@/lib/market-types";
+import {
+  autoDetectABCImproved,
+  type ABCImprovedDetection,
+  type ABCScenario,
+} from "@/lib/elliottABCEngine";
 
 export const IMPULSE_LABELS = ["1", "2", "3", "4", "5"] as const;
 export const CORRECTIVE_LABELS = ["A", "B", "C"] as const;
@@ -127,6 +132,8 @@ export type ZigZagOptions = {
 export type AutoDetectWaveOptions = ZigZagOptions & {
   degree?: WaveDegree;
   pattern?: WavePatternType | "either";
+  timeframeLabel?: string;
+  higherTimeframes?: { [key: string]: Candle[] };
 };
 
 export type AutoDetectedWaveCandidate = {
@@ -134,6 +141,7 @@ export type AutoDetectedWaveCandidate = {
   validation: WaveValidationResult;
   confidence: number;
   futureProjection: FutureProjection | null;
+  abcImprovedDetection?: ABCImprovedDetection | null;
   recencyScore: number;
   selectionScore: number;
   candlesFromLatest: number;
@@ -157,6 +165,7 @@ export type AutoWaveDetection = {
   swings: ZigZagSwing[];
   validation: WaveValidationResult | null;
   futureProjection: FutureProjection | null;
+  abcImprovedDetection?: ABCImprovedDetection | null;
 };
 
 export type BuildWaveCountOptions = {
@@ -563,6 +572,107 @@ function calculateCandidateSelectionScore(
     clamp(confidence * 0.62 + recencyScore * 0.28 + projectionScore * 0.1 + completionBonus, 0, 100),
     2,
   );
+}
+
+function buildFutureProjectionFromABCScenario(scenario: ABCScenario) {
+  if (!scenario.targetZone) {
+    return null;
+  }
+
+  return {
+    nextTargetPrice: roundTo(scenario.targetZone.nextTargetPrice, 4),
+    nextWaveTarget: roundTo(scenario.targetZone.nextTargetPrice, 4),
+    probability: roundTo(scenario.targetZone.probability, 2),
+    minTarget: roundTo(scenario.targetZone.minTarget, 4),
+    maxTarget: roundTo(scenario.targetZone.maxTarget, 4),
+    label: scenario.targetZone.label,
+    scenarioLabel: scenario.targetZone.label,
+  } satisfies FutureProjection;
+}
+
+function mapABCScenarioRuleStatus(status: ABCScenario["rules"]["details"][number]["status"]) {
+  return status === "pending" ? "warning" : status;
+}
+
+function appendABCScenarioRules(
+  validation: WaveValidationResult,
+  scenario: ABCScenario,
+) {
+  const existingRuleIds = new Set(validation.rules.map((rule) => rule.id));
+  const abcRules = scenario.rules.details
+    .filter((rule) => !existingRuleIds.has(`abc-${rule.id}`))
+    .map((rule) =>
+      buildRule(
+        `abc-${rule.id}`,
+        rule.label,
+        rule.detail,
+        rule.message,
+        mapABCScenarioRuleStatus(rule.status),
+        rule.severity,
+        rule.value,
+        rule.target,
+      ),
+    );
+  const hardRulePassed =
+    validation.hardRulePassed &&
+    scenario.rules.details
+      .filter((rule) => rule.severity === "hard" && rule.status !== "pending")
+      .every((rule) => rule.status !== "fail");
+  const messages = [
+    ...validation.messages,
+    ...abcRules
+      .filter((rule) => rule.status !== "pass")
+      .map((rule) => rule.message),
+  ];
+
+  return {
+    ...validation,
+    hardRulePassed,
+    isValid: validation.isValid && hardRulePassed,
+    rules: [...validation.rules, ...abcRules],
+    messages,
+  } satisfies WaveValidationResult;
+}
+
+function buildAutoDetectedCandidateFromABCScenario(
+  scenario: ABCScenario,
+) {
+  const baseValidation = validateWaveCount(scenario.count);
+  const validation = appendABCScenarioRules(baseValidation, scenario);
+  const futureProjection =
+    buildFutureProjectionFromABCScenario(scenario) ??
+    getWaveFutureProjection(scenario.count);
+  const scoredCount: WaveCount = {
+    ...scenario.count,
+    confidence: scenario.confidence,
+    futureProjection: futureProjection ?? undefined,
+  };
+
+  return {
+    count: scoredCount,
+    validation: {
+      ...validation,
+      score: scenario.confidence,
+      isValid: validation.hardRulePassed,
+    },
+    confidence: scenario.confidence,
+    futureProjection,
+    recencyScore: scenario.recencyScore,
+    selectionScore: scenario.selectionScore,
+    candlesFromLatest: scenario.candlesFromLatest,
+    swings: scenario.swings.map((swing) => ({
+      id: swing.id,
+      index: swing.index,
+      time: swing.time,
+      price: swing.price,
+      kind: swing.kind,
+      strength: 0,
+      source: "auto" as const,
+    })),
+    deviationPercent: scenario.detectorMeta.deviationThreshold,
+    depth: scenario.detectorMeta.fractalSpan,
+    backstep: scenario.detectorMeta.minBarsBetween,
+  } satisfies AutoDetectedWaveCandidate;
 }
 
 function scoreTargetRatio(
@@ -1729,50 +1839,6 @@ function buildAutoImpulseCount(sequence: ZigZagSwing[], degree: WaveDegree): Wav
 
   return {
     pattern: "impulse",
-    direction,
-    degree,
-    source: "auto",
-    anchor: {
-      id: `wave-origin-${anchorSwing.time}`,
-      price: anchorSwing.price,
-      time: anchorSwing.time,
-      kind: anchorSwing.kind,
-      index: anchorSwing.index,
-    },
-    points,
-  };
-}
-
-function buildAutoCorrectiveCount(sequence: ZigZagSwing[], degree: WaveDegree): WaveCount | null {
-  if (sequence.length < 3 || sequence.length > 4) {
-    return null;
-  }
-
-  const [anchorSwing, ...waveSwings] = sequence;
-  const direction: WaveTrend =
-    waveSwings[0].price >= anchorSwing.price ? "bullish" : "bearish";
-  const expectedKinds =
-    direction === "bullish"
-      ? (["low", "high", "low", "high"] as const)
-      : (["high", "low", "high", "low"] as const);
-
-  if (!sequence.every((swing, index) => swing.kind === expectedKinds[index])) {
-    return null;
-  }
-
-  const points = waveSwings.map<WavePoint>((swing, index) => ({
-    id: `wave-${CORRECTIVE_LABELS[index]}-${swing.time}`,
-    label: CORRECTIVE_LABELS[index],
-    price: swing.price,
-    time: swing.time,
-    degree,
-    source: "auto",
-    index: swing.index,
-    kind: swing.kind,
-  }));
-
-  return {
-    pattern: "corrective",
     direction,
     degree,
     source: "auto",
@@ -3025,7 +3091,6 @@ function pickPatternCandidate(
   candidates: AutoDetectedWaveCandidate[],
   pattern: WavePatternType,
 ) {
-  const expectedPointLength = pattern === "impulse" ? 5 : 3;
   const patternCandidates = candidates.filter(
     (candidate) => candidate.count.pattern === pattern && candidate.validation.hardRulePassed,
   );
@@ -3034,15 +3099,28 @@ function pickPatternCandidate(
     return null;
   }
 
+  if (pattern === "corrective") {
+    return (
+      patternCandidates.find(
+        (candidate) =>
+          candidate.futureProjection?.label === "Wave C Objective" &&
+          candidate.recencyScore >= 55,
+      ) ??
+      patternCandidates.find((candidate) => candidate.recencyScore >= 55) ??
+      patternCandidates.find((candidate) => candidate.count.points.length === 3) ??
+      patternCandidates[0]
+    );
+  }
+
   return (
     patternCandidates.find(
       (candidate) =>
-        candidate.count.points.length === expectedPointLength && candidate.recencyScore >= 55,
+        candidate.count.points.length === 5 && candidate.recencyScore >= 55,
     ) ??
     patternCandidates.find((candidate) => candidate.recencyScore >= 55) ??
     patternCandidates.find(
       (candidate) =>
-        candidate.count.points.length === expectedPointLength &&
+        candidate.count.points.length === 5 &&
         candidate.validation.hardRulePassed,
     ) ??
     patternCandidates[0]
@@ -3134,32 +3212,27 @@ export function autoDetectWaveCount(
         }
       }
     }
+  }
 
-    if (patternPreference === "either" || patternPreference === "corrective") {
-      for (const sequenceLength of [4, 3] as const) {
-        for (let index = 0; index <= swingSet.swings.length - sequenceLength; index += 1) {
-          const corrective = buildAutoCorrectiveCount(
-            swingSet.swings.slice(index, index + sequenceLength),
-            degree,
-          );
+  let abcImprovedDetection: ABCImprovedDetection | null = null;
 
-          if (!corrective) {
-            continue;
-          }
+  if (patternPreference === "either" || patternPreference === "corrective") {
+    abcImprovedDetection = autoDetectABCImproved(
+      candles,
+      options.timeframeLabel ?? "30m",
+      options.higherTimeframes,
+    );
 
-          const candidate = buildDetectedCandidate(corrective, swingSet, latestCandleIndex);
+    for (const scenario of abcImprovedDetection.scenarios) {
+      const candidate = {
+        ...buildAutoDetectedCandidateFromABCScenario(scenario.legacyScenario),
+        abcImprovedDetection,
+      };
+      const signature = buildCountSignature(candidate.count);
+      const existing = rankedBySignature.get(signature);
 
-          if (!candidate) {
-            continue;
-          }
-
-          const signature = buildCountSignature(candidate.count);
-          const existing = rankedBySignature.get(signature);
-
-          if (!existing || compareDetectedCandidates(candidate, existing) < 0) {
-            rankedBySignature.set(signature, candidate);
-          }
-        }
+      if (!existing || compareDetectedCandidates(candidate, existing) < 0) {
+        rankedBySignature.set(signature, candidate);
       }
     }
   }
@@ -3188,5 +3261,6 @@ export function autoDetectWaveCount(
     swings: primary?.swings ?? fallbackSwings,
     validation: primary?.validation ?? null,
     futureProjection: primary?.futureProjection ?? null,
+    abcImprovedDetection,
   };
 }

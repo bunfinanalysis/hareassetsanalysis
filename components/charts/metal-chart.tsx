@@ -12,6 +12,7 @@ import {
   type IChartApi,
   type ISeriesApi,
   type MouseEventParams,
+  type PriceFormatCustom,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
@@ -23,7 +24,6 @@ import {
   buildWaveCount,
   CORRECTIVE_LABELS,
   createWavePoint,
-  getWaveFutureProjection,
   IMPULSE_LABELS,
   sortWavePoints,
   validateWaveCount,
@@ -39,6 +39,12 @@ import {
   type ConfidenceLabel,
   type ReactionType,
 } from "@/lib/elliottReactionEngine";
+import {
+  projectWaveCScenarios,
+  type ABCImprovedDetection,
+  type ABCImprovedScenario,
+  type ABCImprovedTarget,
+} from "@/lib/elliottABCEngine";
 import { cn } from "@/lib/utils";
 import { METAL_SYMBOLS, type Candle, type MetalSymbolCode } from "@/lib/market-types";
 
@@ -88,6 +94,7 @@ type OverlayGeometry = {
   fibonacciLevels: Array<FibonacciLevel & { y: number }>;
   probabilityZones: OverlayProbabilityZone[];
   correctivePrediction: OverlayCorrectivePrediction | null;
+  alternateCorrectivePredictions: OverlayCorrectivePrediction[];
   retracementBarrier: OverlayRetracementBarrier | null;
 };
 
@@ -102,6 +109,7 @@ type WaveAnalysis = {
   activeCount: WaveCount | null;
   activeDirection: WaveTrend;
   validation: ReturnType<typeof validateWaveCount> | null;
+  abcScenarios?: ABCImprovedScenario[];
 };
 
 export type MetalChartInteractionMode = InteractionMode;
@@ -131,6 +139,7 @@ type OverlayProbabilityZone = ProbabilityZoneTarget & {
 type CorrectivePredictionTarget = {
   id: string;
   label: string;
+  scenarioName?: string;
   startTime: number;
   startPrice: number;
   targetPrice: number;
@@ -141,6 +150,8 @@ type CorrectivePredictionTarget = {
   reasonSummary: string;
   reasons: string[];
   invalidationLevel?: number;
+  targets?: ABCImprovedTarget[];
+  channel?: ABCImprovedScenario["channel"];
 };
 
 type OverlayCorrectivePrediction = CorrectivePredictionTarget & {
@@ -148,6 +159,10 @@ type OverlayCorrectivePrediction = CorrectivePredictionTarget & {
   startY: number;
   targetX: number;
   targetY: number;
+  channelOverlay?: {
+    upperLine: { x1: number; y1: number; x2: number; y2: number };
+    lowerLine: { x1: number; y1: number; x2: number; y2: number };
+  };
 };
 
 type UserDrawnLine = {
@@ -250,6 +265,7 @@ type OverlayRetracementBarrier = Omit<RetracementBarrierTarget, "levels"> & {
 type OverlayPriceExtents = {
   min: number;
   max: number;
+  fixed?: boolean;
 };
 
 const IMPULSE_COLOR = "#3b82f6";
@@ -273,6 +289,7 @@ const EMPTY_OVERLAY: OverlayGeometry = {
   fibonacciLevels: [],
   probabilityZones: [],
   correctivePrediction: null,
+  alternateCorrectivePredictions: [],
   retracementBarrier: null,
 };
 
@@ -762,6 +779,93 @@ function formatOverlayPrice(price: number) {
   return price.toFixed(decimals);
 }
 
+function normalizePriceForYAxisLabel(price: number, symbol: MetalSymbolCode) {
+  if (!Number.isFinite(price)) {
+    return 0;
+  }
+
+  let normalizedPrice = price;
+
+  if (symbol === "XAGUSD") {
+    while (Math.abs(normalizedPrice) > 1000) {
+      normalizedPrice /= 1000;
+    }
+
+    return normalizedPrice;
+  }
+
+  while (Math.abs(normalizedPrice) > 100000) {
+    normalizedPrice /= 1000;
+  }
+
+  return normalizedPrice;
+}
+
+function formatYAxisPrice(price: number, symbol: MetalSymbolCode) {
+  return `$${normalizePriceForYAxisLabel(price, symbol).toFixed(2)}`;
+}
+
+function getYAxisPriceFormat(symbol: MetalSymbolCode): PriceFormatCustom {
+  return {
+    type: "custom",
+    minMove: 0.01,
+    formatter: (price) => formatYAxisPrice(price, symbol),
+    tickmarksFormatter: (prices) => prices.map((price) => formatYAxisPrice(price, symbol)),
+  };
+}
+
+function getChartLocalization(symbol: MetalSymbolCode) {
+  return {
+    locale: "en-US",
+    priceFormatter: (price: number) => formatYAxisPrice(price, symbol),
+    tickmarksPriceFormatter: (prices: number[]) =>
+      prices.map((price) => formatYAxisPrice(price, symbol)),
+  };
+}
+
+function normalizeOverlayPriceForScale(price: number, currentPrice: number | null) {
+  if (!Number.isFinite(price)) {
+    return null;
+  }
+
+  let normalizedPrice = price;
+  const referencePrice =
+    typeof currentPrice === "number" && Number.isFinite(currentPrice) && currentPrice > 0
+      ? currentPrice
+      : null;
+
+  if (referencePrice && referencePrice < 1000) {
+    while (Math.abs(normalizedPrice) > 1000) {
+      normalizedPrice /= 1000;
+    }
+  } else if (Math.abs(normalizedPrice) > 10000) {
+    while (Math.abs(normalizedPrice) > 1000) {
+      normalizedPrice /= 1000;
+    }
+  }
+
+  return Number.isFinite(normalizedPrice) ? normalizedPrice : null;
+}
+
+function toFixedAutoPriceExtents(
+  priceRange: ABCImprovedDetection["chartOverlays"]["priceRange"] | null | undefined,
+) {
+  if (
+    !priceRange ||
+    !Number.isFinite(priceRange.minPrice) ||
+    !Number.isFinite(priceRange.maxPrice) ||
+    priceRange.maxPrice <= priceRange.minPrice
+  ) {
+    return null;
+  }
+
+  return {
+    min: priceRange.minPrice,
+    max: priceRange.maxPrice,
+    fixed: true,
+  } satisfies OverlayPriceExtents;
+}
+
 function normalizeResistanceZonePrices(topPrice: number, bottomPrice: number) {
   return {
     topPrice: Math.max(topPrice, bottomPrice),
@@ -827,38 +931,73 @@ function getConfidenceLabelFromProbability(probability: number): ConfidenceLabel
 function buildCorrectivePredictionTarget(
   count: WaveCount | null,
   validation: ReturnType<typeof validateWaveCount> | null,
-) {
-  if (!count || count.pattern !== "corrective" || count.points.length !== 2) {
+  candles: Candle[],
+  timeframeLabel: string,
+  improvedScenario: ABCImprovedScenario | null = null,
+): CorrectivePredictionTarget | null {
+  if (!count || count.pattern !== "corrective" || count.points.length < 2) {
     return null;
   }
 
   const points = sortWavePoints(count.points);
   const waveBPoint = points[1];
-  const futureProjection = getWaveFutureProjection(count);
+  const abcScenario =
+    improvedScenario?.legacyScenario ??
+    projectWaveCScenarios(count, candles, {
+      timeframe: timeframeLabel,
+      degree: count.degree,
+      limit: 5,
+    })[0] ??
+    null;
+  const futureProjection = abcScenario?.targetZone ?? null;
 
   if (!waveBPoint || !futureProjection) {
     return null;
   }
 
   const reactionAnalysis = buildWaveReactionAnalysis(count, validation);
-  const probability = futureProjection.probability;
+  const probability =
+    improvedScenario?.confidence ??
+    abcScenario?.confidence ??
+    futureProjection.probability;
 
   return {
     id: `${count.anchor?.id ?? waveBPoint.id}-wave-c-prediction`,
-    label: "Predicted Wave C",
+    label: "Wave C Objective",
+    scenarioName: improvedScenario?.name,
     startTime: waveBPoint.time,
     startPrice: waveBPoint.price,
-    targetPrice: futureProjection.nextTargetPrice,
-    zoneLow: futureProjection.minTarget,
-    zoneHigh: futureProjection.maxTarget,
+    targetPrice: improvedScenario?.waveCProjection ?? futureProjection.nextTargetPrice,
+    zoneLow:
+      improvedScenario?.targets[0] && improvedScenario?.targets[1]
+        ? Math.min(improvedScenario.targets[0].price, improvedScenario.targets[1].price)
+        : futureProjection.minTarget,
+    zoneHigh:
+      improvedScenario?.targets[0] && improvedScenario?.targets[1]
+        ? Math.max(improvedScenario.targets[0].price, improvedScenario.targets[1].price)
+        : futureProjection.maxTarget,
     confidence: probability,
     confidenceLabel:
-      reactionAnalysis?.primaryZone?.confidenceLabel ??
+      improvedScenario || abcScenario
+        ? getConfidenceLabelFromProbability(probability)
+        : reactionAnalysis?.primaryZone?.confidenceLabel ??
       getConfidenceLabelFromProbability(probability),
     reasonSummary:
-      reactionAnalysis?.primaryZone?.reasonSummary ?? "Wave C objective confluence",
-    reasons: reactionAnalysis?.primaryZone?.reasons ?? [],
-    invalidationLevel: reactionAnalysis?.invalidation?.level,
+      improvedScenario?.reason ??
+      abcScenario?.reasonSummary ??
+      reactionAnalysis?.primaryZone?.reasonSummary ??
+      "Wave C objective confluence",
+    reasons:
+      improvedScenario?.fibRelationships ??
+      abcScenario?.reasons ??
+      reactionAnalysis?.primaryZone?.reasons ??
+      [],
+    invalidationLevel:
+      improvedScenario?.invalidationLevel ??
+      abcScenario?.invalidationLevel ??
+      reactionAnalysis?.invalidation?.level,
+    targets: improvedScenario?.targets,
+    channel: improvedScenario?.channel,
   } satisfies CorrectivePredictionTarget;
 }
 
@@ -888,13 +1027,37 @@ function buildOverlayPriceExtents(
   wavePoints: WavePoint[],
   probabilityZoneTargets: ProbabilityZoneTarget[],
   correctivePredictionTarget: CorrectivePredictionTarget | null,
+  alternateCorrectivePredictionTargets: CorrectivePredictionTarget[],
   resistanceZones: ResistanceZone[],
   draftResistanceZone: ResistanceZone | null,
   pendingResistanceZoneAnchor: number | null,
   retracementBarrierTarget: RetracementBarrierTarget | null,
   validations: Array<ReturnType<typeof validateWaveCount> | null>,
+  currentPrice: number | null,
 ): OverlayPriceExtents | null {
-  const prices = [
+  const validationLevels = validations.flatMap((validation) => validation?.fibonacciLevels ?? []);
+  const activeValidationPrices = validationLevels
+    .filter((level) => level.isActive)
+    .map((level) => level.price);
+  const nearbyValidationPrices =
+    currentPrice === null
+      ? validationLevels.slice(0, 4).map((level) => level.price)
+      : validationLevels
+          .slice()
+          .sort(
+            (left, right) =>
+              Math.abs(left.price - currentPrice) - Math.abs(right.price - currentPrice),
+          )
+          .slice(0, 4)
+          .map((level) => level.price);
+  const selectedValidationPrices = Array.from(
+    new Set(
+      [...activeValidationPrices, ...nearbyValidationPrices].map((price) =>
+        Number(price.toFixed(4)),
+      ),
+    ),
+  );
+  const rawPrices = [
     ...wavePoints.map((point) => point.price),
     ...probabilityZoneTargets.flatMap((zone) => [zone.priceLow, zone.priceHigh]),
     ...(correctivePredictionTarget
@@ -903,11 +1066,30 @@ function buildOverlayPriceExtents(
           correctivePredictionTarget.targetPrice,
           correctivePredictionTarget.zoneLow,
           correctivePredictionTarget.zoneHigh,
+          ...(correctivePredictionTarget.channel
+            ? [
+                correctivePredictionTarget.channel.upper,
+                correctivePredictionTarget.channel.lower,
+                correctivePredictionTarget.channel.upperLine.startPrice,
+                correctivePredictionTarget.channel.upperLine.endPrice,
+                correctivePredictionTarget.channel.lowerLine.startPrice,
+                correctivePredictionTarget.channel.lowerLine.endPrice,
+              ]
+            : []),
           ...(typeof correctivePredictionTarget.invalidationLevel === "number"
             ? [correctivePredictionTarget.invalidationLevel]
             : []),
         ]
       : []),
+    ...alternateCorrectivePredictionTargets.flatMap((predictionTarget) => [
+      predictionTarget.startPrice,
+      predictionTarget.targetPrice,
+      predictionTarget.zoneLow,
+      predictionTarget.zoneHigh,
+      ...(typeof predictionTarget.invalidationLevel === "number"
+        ? [predictionTarget.invalidationLevel]
+        : []),
+    ]),
     ...resistanceZones.flatMap((zone) => [zone.topPrice, zone.bottomPrice]),
     ...(draftResistanceZone
       ? [draftResistanceZone.topPrice, draftResistanceZone.bottomPrice]
@@ -922,10 +1104,11 @@ function buildOverlayPriceExtents(
           ...retracementBarrierTarget.levels.map((level) => level.price),
         ]
       : []),
-    ...validations.flatMap((validation) =>
-      validation?.fibonacciLevels.map((level) => level.price) ?? [],
-    ),
+    ...selectedValidationPrices,
   ].filter((price): price is number => Number.isFinite(price));
+  const prices = rawPrices
+    .map((price) => normalizeOverlayPriceForScale(price, currentPrice))
+    .filter((price): price is number => typeof price === "number");
 
   if (prices.length === 0) {
     return null;
@@ -1129,6 +1312,7 @@ function buildOverlayGeometry(
   analysis: WaveAnalysis,
   probabilityZoneTargets: ProbabilityZoneTarget[],
   correctivePredictionTarget: CorrectivePredictionTarget | null,
+  alternateCorrectivePredictionTargets: CorrectivePredictionTarget[],
   resistanceZones: ResistanceZone[],
   draftResistanceZone: ResistanceZone | null,
   pendingResistanceZoneAnchor: number | null,
@@ -1183,22 +1367,24 @@ function buildOverlayGeometry(
   const overlayDraftResistanceZone = draftResistanceZone
     ? toOverlayResistanceZone(draftResistanceZone)
     : null;
-  const fibonacciLevels = selectRelevantFibonacciLevels(
-    (analysis.validation?.fibonacciLevels ?? [])
-    .map((level) => {
-      const y = series.priceToCoordinate(level.price);
+  const fibonacciLevels = correctivePredictionTarget
+    ? []
+    : selectRelevantFibonacciLevels(
+        (analysis.validation?.fibonacciLevels ?? [])
+          .map((level) => {
+            const y = series.priceToCoordinate(level.price);
 
-      if (y === null) {
-        return null;
-      }
+            if (y === null) {
+              return null;
+            }
 
-      return {
-        ...level,
-        y: Number(y),
-      };
-    })
-    .filter((level): level is FibonacciLevel & { y: number } => level !== null),
-  );
+            return {
+              ...level,
+              y: Number(y),
+            };
+          })
+          .filter((level): level is FibonacciLevel & { y: number } => level !== null),
+      );
   const userLines = drawnLines
     .map<OverlayUserDrawnLine | null>((line) => {
       const x1 = chart.timeScale().timeToCoordinate(line.startTime as UTCTimestamp);
@@ -1289,16 +1475,19 @@ function buildOverlayGeometry(
 
       return right.confidence - left.confidence;
     });
-  const correctivePrediction = (() => {
-    if (!correctivePredictionTarget) {
+  const toOverlayCorrectivePrediction = (
+    predictionTarget: CorrectivePredictionTarget | null,
+    alternateIndex = 0,
+  ): OverlayCorrectivePrediction | null => {
+    if (!predictionTarget) {
       return null;
     }
 
     const startX = chart.timeScale().timeToCoordinate(
-      correctivePredictionTarget.startTime as UTCTimestamp,
+      predictionTarget.startTime as UTCTimestamp,
     );
-    const startY = series.priceToCoordinate(correctivePredictionTarget.startPrice);
-    const targetY = series.priceToCoordinate(correctivePredictionTarget.targetPrice);
+    const startY = series.priceToCoordinate(predictionTarget.startPrice);
+    const targetY = series.priceToCoordinate(predictionTarget.targetPrice);
 
     if (startX === null || startY === null || targetY === null) {
       return null;
@@ -1306,20 +1495,82 @@ function buildOverlayGeometry(
 
     const width = container.clientWidth;
     const resolvedStartX = Number(startX);
+    const alternateOffset = alternateIndex * 28;
     const targetX = clamp(
-      Math.max(resolvedStartX + 96, width - 92),
-      resolvedStartX + 48,
-      Math.max(width - 26, resolvedStartX + 48),
+      resolvedStartX + Math.min(Math.max(width * 0.14, 72), 128) + alternateOffset,
+      resolvedStartX + 56,
+      Math.max(width - 42, resolvedStartX + 56),
     );
+    const channelOverlay = (() => {
+      if (!predictionTarget.channel) {
+        return undefined;
+      }
+
+      const upperStartX = chart.timeScale().timeToCoordinate(
+        predictionTarget.channel.upperLine.startTime as UTCTimestamp,
+      );
+      const upperEndX = chart.timeScale().timeToCoordinate(
+        predictionTarget.channel.upperLine.endTime as UTCTimestamp,
+      );
+      const lowerStartX = chart.timeScale().timeToCoordinate(
+        predictionTarget.channel.lowerLine.startTime as UTCTimestamp,
+      );
+      const lowerEndX = chart.timeScale().timeToCoordinate(
+        predictionTarget.channel.lowerLine.endTime as UTCTimestamp,
+      );
+      const upperStartY = series.priceToCoordinate(
+        predictionTarget.channel.upperLine.startPrice,
+      );
+      const upperEndY = series.priceToCoordinate(
+        predictionTarget.channel.upperLine.endPrice,
+      );
+      const lowerStartY = series.priceToCoordinate(
+        predictionTarget.channel.lowerLine.startPrice,
+      );
+      const lowerEndY = series.priceToCoordinate(
+        predictionTarget.channel.lowerLine.endPrice,
+      );
+
+      if (
+        upperStartY === null ||
+        upperEndY === null ||
+        lowerStartY === null ||
+        lowerEndY === null
+      ) {
+        return undefined;
+      }
+
+      return {
+        upperLine: {
+          x1: upperStartX === null ? 14 : Number(upperStartX),
+          y1: Number(upperStartY),
+          x2: upperEndX === null ? targetX : Number(upperEndX),
+          y2: Number(upperEndY),
+        },
+        lowerLine: {
+          x1: lowerStartX === null ? 14 : Number(lowerStartX),
+          y1: Number(lowerStartY),
+          x2: lowerEndX === null ? targetX : Number(lowerEndX),
+          y2: Number(lowerEndY),
+        },
+      };
+    })();
 
     return {
-      ...correctivePredictionTarget,
+      ...predictionTarget,
       startX: resolvedStartX,
       startY: Number(startY),
       targetX,
       targetY: Number(targetY),
+      channelOverlay,
     };
-  })();
+  };
+  const correctivePrediction = toOverlayCorrectivePrediction(correctivePredictionTarget);
+  const alternateCorrectivePredictions = alternateCorrectivePredictionTargets
+    .map((predictionTarget, index) =>
+      toOverlayCorrectivePrediction(predictionTarget, index + 1),
+    )
+    .filter((prediction): prediction is OverlayCorrectivePrediction => prediction !== null);
   const retracementBarrier = (() => {
     if (!retracementBarrierTarget) {
       return null;
@@ -1364,7 +1615,7 @@ function buildOverlayGeometry(
       bottomY:
         bottomY - topY < minBandHeight ? centerY + minBandHeight / 2 : bottomY,
       centerY,
-      levels,
+      levels: selectVisibleRetracementBarrierLevels(levels),
     };
   })();
 
@@ -1381,6 +1632,7 @@ function buildOverlayGeometry(
     fibonacciLevels,
     probabilityZones,
     correctivePrediction,
+    alternateCorrectivePredictions,
     retracementBarrier,
   };
 }
@@ -1450,8 +1702,23 @@ function buildGeometryFingerprint(geometry: OverlayGeometry) {
           Math.round(geometry.correctivePrediction.startY),
           Math.round(geometry.correctivePrediction.targetX),
           Math.round(geometry.correctivePrediction.targetY),
+          ...(geometry.correctivePrediction.channelOverlay
+            ? [
+                Math.round(geometry.correctivePrediction.channelOverlay.upperLine.y1),
+                Math.round(geometry.correctivePrediction.channelOverlay.upperLine.y2),
+                Math.round(geometry.correctivePrediction.channelOverlay.lowerLine.y1),
+                Math.round(geometry.correctivePrediction.channelOverlay.lowerLine.y2),
+              ]
+            : []),
         ]
       : null,
+    alternateCorrectivePredictions: geometry.alternateCorrectivePredictions.map((prediction) => [
+      prediction.id,
+      Math.round(prediction.startX),
+      Math.round(prediction.startY),
+      Math.round(prediction.targetX),
+      Math.round(prediction.targetY),
+    ]),
     retracementBarrier: geometry.retracementBarrier
       ? [
           geometry.retracementBarrier.id,
@@ -1544,6 +1811,17 @@ function buildWaveAnalysisSignature(analysis: WaveAnalysis) {
     validation: serializeValidation(analysis.validation),
     impulseValidation: serializeValidation(analysis.impulseValidation),
     correctiveValidation: serializeValidation(analysis.correctiveValidation),
+    abcScenarios: analysis.abcScenarios?.map((scenario) => ({
+      id: scenario.id,
+      name: scenario.name,
+      confidence: scenario.confidence,
+      projection: scenario.waveCProjection,
+      targets: scenario.targets.map((target) => [
+        target.fibRatio,
+        target.price,
+        target.probability,
+      ]),
+    })),
   });
 }
 
@@ -1594,10 +1872,9 @@ function applyPreferredTimeScaleWindow(
 }
 
 function buildAutoDetectedWavePoints(detection: ReturnType<typeof autoDetectWaveCount>) {
-  const detectedCounts = [detection.impulseCount, detection.correctiveCount].filter(
-    (count): count is WaveCount => count !== null,
-  );
-  const selectedCounts = detectedCounts.length > 0 ? detectedCounts : detection.count ? [detection.count] : [];
+  const primaryCount =
+    detection.count ?? detection.correctiveCount ?? detection.impulseCount ?? null;
+  const selectedCounts = primaryCount ? [primaryCount] : [];
 
   return sortWavePoints(
     selectedCounts.flatMap((count) =>
@@ -1609,6 +1886,28 @@ function buildAutoDetectedWavePoints(detection: ReturnType<typeof autoDetectWave
       ),
     ),
   );
+}
+
+function selectVisibleRetracementBarrierLevels(
+  levels: Array<RetracementBarrierLevel & { y: number }>,
+) {
+  if (levels.length <= 2) {
+    return levels;
+  }
+
+  const primaryLevels = levels.filter((level) => level.emphasis === "primary");
+
+  if (primaryLevels.length >= 2) {
+    return primaryLevels.slice(0, 2);
+  }
+
+  if (primaryLevels.length === 1) {
+    const secondaryLevel = levels.find((level) => level.id !== primaryLevels[0].id);
+
+    return secondaryLevel ? [primaryLevels[0], secondaryLevel] : primaryLevels;
+  }
+
+  return levels.slice(0, 2);
 }
 
 function pickCompanionDetectedCandidate(
@@ -1677,8 +1976,11 @@ export function MetalChart({
   const [alternateWaveCount, setAlternateWaveCount] = useState<WaveCount | null>(null);
   const [alternateWaveValidation, setAlternateWaveValidation] =
     useState<ReturnType<typeof validateWaveCount> | null>(null);
+  const [autoABCDetection, setAutoABCDetection] =
+    useState<ReturnType<typeof autoDetectWaveCount>["abcImprovedDetection"]>(null);
   const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
   const [activeResistanceZoneId, setActiveResistanceZoneId] = useState<string | null>(null);
+  const [hoveredProjectionZoneId, setHoveredProjectionZoneId] = useState<string | null>(null);
   const [overlayGeometry, setOverlayGeometry] = useState<OverlayGeometry>(EMPTY_OVERLAY);
   const interactionMode = controlledInteractionMode ?? internalInteractionMode;
   const wavePoints = controlledWavePoints ?? internalWavePoints;
@@ -1793,10 +2095,20 @@ export function MetalChart({
     resetAlternateCountRef.current = resetAlternateCount;
   }, [resetAlternateCount]);
 
-  const waveAnalysis = useMemo(
+  const baseWaveAnalysis = useMemo(
     () => buildWaveAnalysis(wavePoints, candles, interactionMode),
     [candles, interactionMode, wavePoints],
   );
+  const waveAnalysis = useMemo(() => {
+    if (interactionMode !== "auto" || !autoABCDetection?.scenarios.length) {
+      return baseWaveAnalysis;
+    }
+
+    return {
+      ...baseWaveAnalysis,
+      abcScenarios: autoABCDetection.scenarios,
+    } satisfies WaveAnalysis;
+  }, [autoABCDetection, baseWaveAnalysis, interactionMode]);
   const probabilityZoneTargets = useMemo(() => {
     if (interactionMode !== "manual") {
       return [];
@@ -1828,31 +2140,76 @@ export function MetalChart({
     waveAnalysis.impulseValidation,
   ]);
   const availableCorrectivePredictionTarget = useMemo(
-    () =>
-      buildCorrectivePredictionTarget(
-        waveAnalysis.correctiveCount,
+    () => {
+      const improvedScenario =
+        interactionMode === "auto" ? autoABCDetection?.primaryScenario ?? null : null;
+
+      return buildCorrectivePredictionTarget(
+        improvedScenario?.legacyScenario.count ?? waveAnalysis.correctiveCount,
         waveAnalysis.correctiveValidation,
-      ),
-    [waveAnalysis.correctiveCount, waveAnalysis.correctiveValidation],
+        candles,
+        timeframeLabel,
+        improvedScenario,
+      );
+    },
+    [
+      autoABCDetection,
+      candles,
+      interactionMode,
+      timeframeLabel,
+      waveAnalysis.correctiveCount,
+      waveAnalysis.correctiveValidation,
+    ],
   );
+  const alternateCorrectivePredictionTargets = useMemo(() => {
+    if (interactionMode !== "auto" || !autoABCDetection?.scenarios.length) {
+      return [] as CorrectivePredictionTarget[];
+    }
+
+    return autoABCDetection.scenarios
+      .slice(1, 3)
+      .map((scenario) =>
+        buildCorrectivePredictionTarget(
+          scenario.legacyScenario.count,
+          waveAnalysis.correctiveValidation,
+          candles,
+          timeframeLabel,
+          scenario,
+        ),
+      )
+      .filter(
+        (predictionTarget): predictionTarget is CorrectivePredictionTarget =>
+          predictionTarget !== null,
+      );
+  }, [
+    autoABCDetection,
+    candles,
+    interactionMode,
+    timeframeLabel,
+    waveAnalysis.correctiveValidation,
+  ]);
   const correctivePredictionTarget = useMemo(() => {
-    if (
-      !showCorrectivePrediction ||
-      interactionMode !== "manual" ||
-      manualWaveMode !== "corrective"
-    ) {
+    const shouldShowManualPrediction =
+      interactionMode === "manual" &&
+      manualWaveMode === "corrective" &&
+      showCorrectivePrediction;
+    const shouldShowAutoPrediction =
+      interactionMode === "auto" && Boolean(autoABCDetection?.primaryScenario);
+
+    if (!shouldShowManualPrediction && !shouldShowAutoPrediction) {
       return null;
     }
 
     return availableCorrectivePredictionTarget;
   }, [
     availableCorrectivePredictionTarget,
+    autoABCDetection,
     interactionMode,
     manualWaveMode,
     showCorrectivePrediction,
   ]);
   const retracementBarrierTarget = useMemo(() => {
-    if (interactionMode === "manual") {
+    if (interactionMode === "manual" || correctivePredictionTarget) {
       return null;
     }
 
@@ -1907,6 +2264,7 @@ export function MetalChart({
     alternateWaveCount,
     alternateWaveValidation,
     candles,
+    correctivePredictionTarget,
     interactionMode,
     waveAnalysis.activeCount,
     waveAnalysis.correctiveCount,
@@ -1915,11 +2273,28 @@ export function MetalChart({
     waveAnalysis.impulseValidation,
   ]);
   const overlayPriceExtents = useMemo(
-    () =>
-      buildOverlayPriceExtents(
+    () => {
+      if (interactionMode === "auto") {
+        const autoPriceExtents = toFixedAutoPriceExtents(
+          autoABCDetection?.chartOverlays.priceRange,
+        );
+
+        if (autoPriceExtents) {
+          return autoPriceExtents;
+        }
+      }
+
+      const activeCountLastPrice =
+        waveAnalysis.activeCount?.points[waveAnalysis.activeCount.points.length - 1]?.price ??
+        null;
+      const currentPrice =
+        candles[candles.length - 1]?.close ?? activeCountLastPrice;
+
+      return buildOverlayPriceExtents(
         wavePoints,
         probabilityZoneTargets,
         correctivePredictionTarget,
+        alternateCorrectivePredictionTargets,
         resistanceZones,
         draftResistanceZone,
         pendingResistanceZoneAnchor,
@@ -1930,15 +2305,22 @@ export function MetalChart({
           waveAnalysis.correctiveValidation,
           alternateWaveValidation,
         ],
-      ),
+        currentPrice,
+      );
+    },
     [
       alternateWaveValidation,
+      alternateCorrectivePredictionTargets,
+      autoABCDetection,
+      candles,
       correctivePredictionTarget,
       draftResistanceZone,
       pendingResistanceZoneAnchor,
       probabilityZoneTargets,
       resistanceZones,
       retracementBarrierTarget,
+      interactionMode,
+      waveAnalysis.activeCount,
       waveAnalysis.correctiveValidation,
       waveAnalysis.impulseValidation,
       waveAnalysis.validation,
@@ -2149,6 +2531,7 @@ export function MetalChart({
     const detection = autoDetectWaveCount(candlesRef.current, {
       degree: "minor",
       pattern: "either",
+      timeframeLabel,
     });
 
     const nextWavePoints = buildAutoDetectedWavePoints(detection);
@@ -2162,6 +2545,7 @@ export function MetalChart({
     setIsResistanceMode(false);
     setDraftResistanceZone(null);
     setPendingResistanceZoneAnchor(null);
+    setAutoABCDetection(detection.abcImprovedDetection ?? null);
     updateWavePoints(nextWavePoints);
 
     const companionCandidate = pickCompanionDetectedCandidate(detection);
@@ -2172,6 +2556,7 @@ export function MetalChart({
   }, [
     publishAlternateCount,
     stopResistanceZoneInteraction,
+    timeframeLabel,
     updateInteractionMode,
     updateWavePoints,
   ]);
@@ -2188,6 +2573,7 @@ export function MetalChart({
     setDraftResistanceZone(null);
     setPendingResistanceZoneAnchor(null);
     setDraggingPointId(null);
+    setAutoABCDetection(null);
     dragPointIdRef.current = null;
     resetAlternateCount();
   }, [
@@ -2555,9 +2941,7 @@ export function MetalChart({
         fixLeftEdge: false,
         fixRightEdge: false,
       },
-      localization: {
-        locale: "en-US",
-      },
+      localization: getChartLocalization(initialSymbolRef.current),
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -2567,11 +2951,7 @@ export function MetalChart({
       wickDownColor: "#f87171",
       borderUpColor: "#10b981",
       borderDownColor: "#f87171",
-      priceFormat: {
-        type: "price",
-        precision: METAL_SYMBOLS[initialSymbolRef.current].precision,
-        minMove: METAL_SYMBOLS[initialSymbolRef.current].minMove,
-      },
+      priceFormat: getYAxisPriceFormat(initialSymbolRef.current),
       priceLineVisible: true,
       lastValueVisible: true,
     });
@@ -2619,12 +2999,12 @@ export function MetalChart({
       close: candle.close,
     }));
 
+    chartRef.current?.applyOptions({
+      localization: getChartLocalization(symbol),
+    });
+
     candleSeriesRef.current.applyOptions({
-      priceFormat: {
-        type: "price",
-        precision: METAL_SYMBOLS[symbol].precision,
-        minMove: METAL_SYMBOLS[symbol].minMove,
-      },
+      priceFormat: getYAxisPriceFormat(symbol),
     });
 
     candleSeriesRef.current.setData(candleData);
@@ -2635,6 +3015,7 @@ export function MetalChart({
       if (chartRef.current) {
         applyPreferredTimeScaleWindow(chartRef.current, candleData.length, timeframeLabel);
       }
+      setAutoABCDetection(null);
       lastResetKeyRef.current = resetKey;
     }
   }, [candles, symbol, timeframeLabel]);
@@ -2668,6 +3049,22 @@ export function MetalChart({
 
         if (!overlayPriceExtents) {
           return base;
+        }
+
+        if (overlayPriceExtents.fixed) {
+          const fixedRangeSize = Math.max(
+            overlayPriceExtents.max - overlayPriceExtents.min,
+            minMove * 16,
+          );
+          const fixedCenter = (overlayPriceExtents.min + overlayPriceExtents.max) / 2;
+
+          return {
+            priceRange: {
+              minValue: fixedCenter - fixedRangeSize / 2,
+              maxValue: fixedCenter + fixedRangeSize / 2,
+            },
+            margins: base?.margins,
+          };
         }
 
         const baseRange = base?.priceRange;
@@ -2717,6 +3114,7 @@ export function MetalChart({
       (waveAnalysis.validation?.fibonacciLevels.length ?? 0) === 0 &&
       probabilityZoneTargets.length === 0 &&
       !correctivePredictionTarget &&
+      alternateCorrectivePredictionTargets.length === 0 &&
       !retracementBarrierTarget
     ) {
       setOverlayGeometry((currentGeometry) =>
@@ -2730,6 +3128,7 @@ export function MetalChart({
         currentGeometry.fibonacciLevels.length === 0 &&
         currentGeometry.probabilityZones.length === 0 &&
         currentGeometry.correctivePrediction === null &&
+        currentGeometry.alternateCorrectivePredictions.length === 0 &&
         currentGeometry.retracementBarrier === null
           ? currentGeometry
           : EMPTY_OVERLAY,
@@ -2751,6 +3150,7 @@ export function MetalChart({
         waveAnalysis,
         probabilityZoneTargets,
         correctivePredictionTarget,
+        alternateCorrectivePredictionTargets,
         resistanceZones,
         draftResistanceZone,
         pendingResistanceZoneAnchor,
@@ -2801,6 +3201,7 @@ export function MetalChart({
       }
     };
   }, [
+    alternateCorrectivePredictionTargets,
     correctivePredictionTarget,
     draftResistanceZone,
     drawnLines,
@@ -2896,6 +3297,509 @@ export function MetalChart({
       : waveAnalysis.activePattern === "impulse"
         ? "Impulse"
         : "No Waves";
+  const primaryCorrectiveProjectionZoneId = "primary-corrective-projection";
+  const getPrimaryCorrectivePredictionZoneGeometry = (
+    prediction: OverlayCorrectivePrediction,
+  ) => {
+    const zoneTopY = Math.min(prediction.targetY, prediction.startY) - 20;
+    const isAutoCorrectiveOverlay = interactionMode === "auto";
+    const compactLabelWidth = 126;
+    const compactLabelHeight = 30;
+    const detailLabelWidth = 188;
+    const detailLabelHeight = 42;
+    const bandTopPrice = Math.max(prediction.zoneLow, prediction.zoneHigh);
+    const bandBottomPrice = Math.min(prediction.zoneLow, prediction.zoneHigh);
+    const bandTopCoordinate = candleSeriesRef.current?.priceToCoordinate(
+      bandTopPrice,
+    );
+    const bandBottomCoordinate = candleSeriesRef.current?.priceToCoordinate(
+      bandBottomPrice,
+    );
+    const bandTopY =
+      bandTopCoordinate === null || bandBottomCoordinate === null
+        ? prediction.targetY - 12
+        : Math.min(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+    const bandBottomY =
+      bandTopCoordinate === null || bandBottomCoordinate === null
+        ? prediction.targetY + 12
+        : Math.max(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+    const zoneWidth = isAutoCorrectiveOverlay
+      ? 92
+      : Math.max(prediction.targetX - prediction.startX - 20, 48);
+    const zoneHeight = Math.max(bandBottomY - bandTopY, 16);
+    const zoneX = isAutoCorrectiveOverlay
+      ? clamp(
+          prediction.targetX - zoneWidth / 2,
+          prediction.startX + 28,
+          Math.max(overlayGeometry.width - zoneWidth - 16, prediction.startX + 28),
+        )
+      : prediction.startX + 10;
+    const zoneCenterX = zoneX + zoneWidth / 2;
+    const labelWidth = isAutoCorrectiveOverlay
+      ? compactLabelWidth
+      : detailLabelWidth;
+    const labelHeight = isAutoCorrectiveOverlay
+      ? compactLabelHeight
+      : detailLabelHeight;
+    const labelX = clamp(
+      zoneCenterX - labelWidth / 2,
+      12,
+      Math.max(overlayGeometry.width - labelWidth - 12, 12),
+    );
+    const labelY = clamp(
+      zoneTopY - (isAutoCorrectiveOverlay ? 42 : 50),
+      12,
+      Math.max(overlayGeometry.height - labelHeight - 12, 12),
+    );
+    const cMarkerX = clamp(
+      zoneCenterX,
+      20,
+      Math.max(overlayGeometry.width - 20, 20),
+    );
+    const cMarkerY = bandTopY - 12;
+    const tooltipLines = [
+      prediction.label,
+      `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
+      `Confidence: ${prediction.confidenceLabel} (${Math.round(prediction.confidence)}%)`,
+      prediction.reasonSummary,
+      ...prediction.reasons,
+      prediction.invalidationLevel
+        ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
+        : null,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
+    const hitboxX = Math.min(zoneX, labelX, cMarkerX - 10);
+    const hitboxY = Math.min(bandTopY, labelY, cMarkerY - 10);
+    const hitboxRight = Math.max(
+      zoneX + zoneWidth,
+      labelX + labelWidth,
+      cMarkerX + 10,
+    );
+    const hitboxBottom = Math.max(
+      bandTopY + zoneHeight,
+      labelY + labelHeight,
+      cMarkerY + 10,
+    );
+
+    return {
+      bandBottomY,
+      bandTopY,
+      cMarkerX,
+      cMarkerY,
+      hitboxBottom,
+      hitboxRight,
+      hitboxX,
+      hitboxY,
+      isAutoCorrectiveOverlay,
+      labelHeight,
+      labelWidth,
+      labelX,
+      labelY,
+      tooltipLines,
+      zoneCenterX,
+      zoneHeight,
+      zoneWidth,
+      zoneX,
+    };
+  };
+  const renderPrimaryCorrectivePredictionZone = (
+    prediction: OverlayCorrectivePrediction,
+    isElevated = false,
+  ) => {
+    const geometry = getPrimaryCorrectivePredictionZoneGeometry(prediction);
+
+    return (
+      <g
+        key={
+          isElevated
+            ? `${primaryCorrectiveProjectionZoneId}-elevated`
+            : primaryCorrectiveProjectionZoneId
+        }
+        className={isElevated ? "pointer-events-none" : undefined}
+      >
+        <title>{geometry.tooltipLines}</title>
+        {prediction.channelOverlay ? (
+          <g opacity={geometry.isAutoCorrectiveOverlay ? 0.42 : 0.56}>
+            <line
+              x1={prediction.channelOverlay.upperLine.x1}
+              y1={prediction.channelOverlay.upperLine.y1}
+              x2={prediction.channelOverlay.upperLine.x2}
+              y2={prediction.channelOverlay.upperLine.y2}
+              stroke="rgba(250, 204, 21, 0.46)"
+              strokeWidth={1}
+              strokeDasharray="6 8"
+            />
+            <line
+              x1={prediction.channelOverlay.lowerLine.x1}
+              y1={prediction.channelOverlay.lowerLine.y1}
+              x2={prediction.channelOverlay.lowerLine.x2}
+              y2={prediction.channelOverlay.lowerLine.y2}
+              stroke="rgba(250, 204, 21, 0.46)"
+              strokeWidth={1}
+              strokeDasharray="6 8"
+            />
+          </g>
+        ) : null}
+        <rect
+          x={geometry.zoneX}
+          y={geometry.bandTopY}
+          width={geometry.zoneWidth}
+          height={geometry.zoneHeight}
+          rx={8}
+          fill={
+            geometry.isAutoCorrectiveOverlay
+              ? "rgba(234, 179, 8, 0.08)"
+              : "rgba(234, 179, 8, 0.1)"
+          }
+          stroke="rgba(250, 204, 21, 0.28)"
+          strokeWidth={1}
+        />
+        <line
+          x1={geometry.zoneX}
+          y1={geometry.bandTopY}
+          x2={geometry.zoneX + geometry.zoneWidth}
+          y2={geometry.bandTopY}
+          stroke="rgba(250, 204, 21, 0.4)"
+          strokeWidth={1}
+          strokeDasharray="3 5"
+        />
+        <line
+          x1={geometry.zoneX}
+          y1={geometry.bandBottomY}
+          x2={geometry.zoneX + geometry.zoneWidth}
+          y2={geometry.bandBottomY}
+          stroke="rgba(250, 204, 21, 0.4)"
+          strokeWidth={1}
+          strokeDasharray="3 5"
+        />
+        <line
+          x1={prediction.startX}
+          y1={prediction.startY}
+          x2={geometry.zoneCenterX}
+          y2={prediction.targetY}
+          stroke={
+            geometry.isAutoCorrectiveOverlay
+              ? "rgba(250, 204, 21, 0.72)"
+              : "rgba(250, 204, 21, 0.82)"
+          }
+          strokeWidth={geometry.isAutoCorrectiveOverlay ? 1.4 : 1.8}
+          strokeDasharray={geometry.isAutoCorrectiveOverlay ? "4 6" : "5 6"}
+          strokeLinecap="round"
+        />
+        <circle
+          cx={geometry.zoneCenterX}
+          cy={prediction.targetY}
+          r={geometry.isAutoCorrectiveOverlay ? 4.5 : 5}
+          fill="#06111f"
+          stroke="#fde047"
+          strokeWidth={1.8}
+        />
+        {geometry.isAutoCorrectiveOverlay ? (
+          <>
+            <circle
+              cx={geometry.cMarkerX}
+              cy={geometry.cMarkerY}
+              r={10}
+              fill="rgba(12, 18, 31, 0.92)"
+              stroke="rgba(250, 204, 21, 0.34)"
+            />
+            <text
+              x={geometry.cMarkerX}
+              y={geometry.cMarkerY + 3.5}
+              fill="#fde047"
+              fontSize="11"
+              fontWeight="700"
+              textAnchor="middle"
+            >
+              C?
+            </text>
+          </>
+        ) : null}
+        <rect
+          x={geometry.labelX}
+          y={geometry.labelY}
+          width={geometry.labelWidth}
+          height={geometry.labelHeight}
+          rx={10}
+          fill="rgba(12, 18, 31, 0.92)"
+          stroke="rgba(250, 204, 21, 0.26)"
+        />
+        <text
+          x={geometry.labelX + geometry.labelWidth / 2}
+          y={geometry.labelY + (geometry.isAutoCorrectiveOverlay ? 12 : 13)}
+          fill="#fde047"
+          fontSize={geometry.isAutoCorrectiveOverlay ? "9.1" : "9.4"}
+          fontWeight="700"
+          textAnchor="middle"
+        >
+          {geometry.isAutoCorrectiveOverlay ? "Wave C Zone" : prediction.label}
+        </text>
+        {geometry.isAutoCorrectiveOverlay ? (
+          <text
+            x={geometry.labelX + geometry.labelWidth / 2}
+            y={geometry.labelY + 23}
+            fill="#fef08a"
+            fontSize="8.6"
+            fontWeight="600"
+            textAnchor="middle"
+          >
+            {`${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}% Fibonacci`}
+          </text>
+        ) : (
+          <>
+            <text
+              x={geometry.labelX + geometry.labelWidth / 2}
+              y={geometry.labelY + 24}
+              fill="#fef08a"
+              fontSize="8.9"
+              fontWeight="600"
+              textAnchor="middle"
+            >
+              {`Confidence: ${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}%`}
+            </text>
+            <text
+              x={geometry.labelX + geometry.labelWidth / 2}
+              y={geometry.labelY + 35}
+              fill="#fde68a"
+              fontSize="8.25"
+              fontWeight="500"
+              textAnchor="middle"
+            >
+              {truncateOverlayText(prediction.reasonSummary, 34)}
+            </text>
+          </>
+        )}
+      </g>
+    );
+  };
+  const renderPrimaryCorrectivePredictionHitbox = (
+    prediction: OverlayCorrectivePrediction,
+  ) => {
+    const geometry = getPrimaryCorrectivePredictionZoneGeometry(prediction);
+
+    return (
+      <rect
+        key={`${primaryCorrectiveProjectionZoneId}-hitbox`}
+        x={geometry.hitboxX}
+        y={geometry.hitboxY}
+        width={Math.max(geometry.hitboxRight - geometry.hitboxX, 1)}
+        height={Math.max(geometry.hitboxBottom - geometry.hitboxY, 1)}
+        fill="transparent"
+        className="pointer-events-auto cursor-pointer"
+        onPointerEnter={() => setHoveredProjectionZoneId(primaryCorrectiveProjectionZoneId)}
+        onPointerLeave={() =>
+          setHoveredProjectionZoneId((currentZoneId) =>
+            currentZoneId === primaryCorrectiveProjectionZoneId ? null : currentZoneId,
+          )
+        }
+      />
+    );
+  };
+  const getAlternateCorrectivePredictionZoneGeometry = (
+    prediction: OverlayCorrectivePrediction,
+    index: number,
+  ) => {
+    const bandTopPrice = Math.max(prediction.zoneLow, prediction.zoneHigh);
+    const bandBottomPrice = Math.min(prediction.zoneLow, prediction.zoneHigh);
+    const bandTopCoordinate = candleSeriesRef.current?.priceToCoordinate(
+      bandTopPrice,
+    );
+    const bandBottomCoordinate = candleSeriesRef.current?.priceToCoordinate(
+      bandBottomPrice,
+    );
+    const bandTopY =
+      bandTopCoordinate === null || bandBottomCoordinate === null
+        ? prediction.targetY - 10
+        : Math.min(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+    const bandBottomY =
+      bandTopCoordinate === null || bandBottomCoordinate === null
+        ? prediction.targetY + 10
+        : Math.max(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+    const zoneWidth = 86;
+    const zoneHeight = Math.max(bandBottomY - bandTopY, 14);
+    const zoneX = clamp(
+      prediction.targetX - zoneWidth / 2 + index * 10,
+      prediction.startX + 20,
+      Math.max(overlayGeometry.width - zoneWidth - 14, prediction.startX + 20),
+    );
+    const zoneCenterX = zoneX + zoneWidth / 2;
+    const labelWidth = 88;
+    const labelHeight = 26;
+    const labelX = clamp(
+      zoneCenterX - labelWidth / 2,
+      12,
+      Math.max(overlayGeometry.width - labelWidth - 12, 12),
+    );
+    const labelY = clamp(
+      bandTopY - 32 - index * 4,
+      12,
+      Math.max(overlayGeometry.height - labelHeight - 12, 12),
+    );
+    const projectionZoneId = `${prediction.id}-alt-${index}`;
+    const altLabel = `Alt ${index + 2} C Zone`;
+    const tooltipLines = [
+      altLabel,
+      prediction.scenarioName,
+      `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
+      `Confidence: ${Math.round(prediction.confidence)}%`,
+      prediction.invalidationLevel
+        ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
+        : null,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
+    const hitboxX = Math.min(zoneX, labelX);
+    const hitboxY = Math.min(bandTopY, labelY);
+    const hitboxRight = Math.max(zoneX + zoneWidth, labelX + labelWidth);
+    const hitboxBottom = Math.max(bandTopY + zoneHeight, labelY + labelHeight);
+
+    return {
+      altLabel,
+      bandBottomY,
+      bandTopY,
+      hitboxBottom,
+      hitboxRight,
+      hitboxX,
+      hitboxY,
+      labelHeight,
+      labelWidth,
+      labelX,
+      labelY,
+      projectionZoneId,
+      tooltipLines,
+      zoneCenterX,
+      zoneHeight,
+      zoneWidth,
+      zoneX,
+    };
+  };
+  const renderAlternateCorrectivePredictionZone = (
+    prediction: OverlayCorrectivePrediction,
+    index: number,
+    isElevated = false,
+  ) => {
+    const geometry = getAlternateCorrectivePredictionZoneGeometry(
+      prediction,
+      index,
+    );
+
+    return (
+      <g
+        key={
+          isElevated
+            ? `${geometry.projectionZoneId}-elevated`
+            : geometry.projectionZoneId
+        }
+        opacity={isElevated ? 0.98 : 0.86}
+        className={isElevated ? "pointer-events-none" : undefined}
+      >
+        <title>{geometry.tooltipLines}</title>
+        <line
+          x1={prediction.startX}
+          y1={prediction.startY}
+          x2={geometry.zoneCenterX}
+          y2={prediction.targetY}
+          stroke={isElevated ? "rgba(251, 146, 60, 0.78)" : "rgba(251, 146, 60, 0.58)"}
+          strokeWidth={isElevated ? 1.45 : 1.15}
+          strokeDasharray="4 7"
+          strokeLinecap="round"
+        />
+        <rect
+          x={geometry.zoneX}
+          y={geometry.bandTopY}
+          width={geometry.zoneWidth}
+          height={geometry.zoneHeight}
+          rx={7}
+          fill={isElevated ? "rgba(249, 115, 22, 0.18)" : "rgba(249, 115, 22, 0.1)"}
+          stroke={isElevated ? "rgba(251, 146, 60, 0.68)" : "rgba(251, 146, 60, 0.34)"}
+          strokeWidth={isElevated ? 1.35 : 1}
+        />
+        <line
+          x1={geometry.zoneX}
+          y1={geometry.bandTopY}
+          x2={geometry.zoneX + geometry.zoneWidth}
+          y2={geometry.bandTopY}
+          stroke={isElevated ? "rgba(251, 146, 60, 0.72)" : "rgba(251, 146, 60, 0.46)"}
+          strokeWidth={isElevated ? 1.2 : 1}
+          strokeDasharray="3 5"
+        />
+        <line
+          x1={geometry.zoneX}
+          y1={geometry.bandBottomY}
+          x2={geometry.zoneX + geometry.zoneWidth}
+          y2={geometry.bandBottomY}
+          stroke={isElevated ? "rgba(251, 146, 60, 0.72)" : "rgba(251, 146, 60, 0.46)"}
+          strokeWidth={isElevated ? 1.2 : 1}
+          strokeDasharray="3 5"
+        />
+        <circle
+          cx={geometry.zoneCenterX}
+          cy={prediction.targetY}
+          r={isElevated ? 4.4 : 3.8}
+          fill="#06111f"
+          stroke={isElevated ? "rgba(253, 186, 116, 0.95)" : "rgba(251, 146, 60, 0.82)"}
+          strokeWidth={isElevated ? 1.8 : 1.5}
+        />
+        <rect
+          x={geometry.labelX}
+          y={geometry.labelY}
+          width={geometry.labelWidth}
+          height={geometry.labelHeight}
+          rx={9}
+          fill="rgba(12, 18, 31, 0.88)"
+          stroke={isElevated ? "rgba(251, 146, 60, 0.54)" : "rgba(251, 146, 60, 0.26)"}
+        />
+        <text
+          x={geometry.labelX + geometry.labelWidth / 2}
+          y={geometry.labelY + 11}
+          fill="#fed7aa"
+          fontSize="8.3"
+          fontWeight="700"
+          textAnchor="middle"
+        >
+          {geometry.altLabel}
+        </text>
+        <text
+          x={geometry.labelX + geometry.labelWidth / 2}
+          y={geometry.labelY + 21}
+          fill="#fdba74"
+          fontSize="7.8"
+          fontWeight="600"
+          textAnchor="middle"
+        >
+          {`${Math.round(prediction.confidence)}%`}
+        </text>
+      </g>
+    );
+  };
+  const renderAlternateCorrectivePredictionHitbox = (
+    prediction: OverlayCorrectivePrediction,
+    index: number,
+  ) => {
+    const geometry = getAlternateCorrectivePredictionZoneGeometry(
+      prediction,
+      index,
+    );
+
+    return (
+      <rect
+        key={`${geometry.projectionZoneId}-hitbox`}
+        x={geometry.hitboxX}
+        y={geometry.hitboxY}
+        width={Math.max(geometry.hitboxRight - geometry.hitboxX, 1)}
+        height={Math.max(geometry.hitboxBottom - geometry.hitboxY, 1)}
+        fill="transparent"
+        className="pointer-events-auto cursor-pointer"
+        onPointerEnter={() => setHoveredProjectionZoneId(geometry.projectionZoneId)}
+        onPointerLeave={() =>
+          setHoveredProjectionZoneId((currentZoneId) =>
+            currentZoneId === geometry.projectionZoneId ? null : currentZoneId,
+          )
+        }
+      />
+    );
+  };
 
   return (
     <div className="relative flex h-full min-h-[540px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0">
@@ -2924,6 +3828,7 @@ export function MetalChart({
             )}
             onClick={() => {
               setManualWaveMode("impulse");
+              setAutoABCDetection(null);
               updateInteractionMode("manual");
             }}
           >
@@ -2939,6 +3844,7 @@ export function MetalChart({
             )}
             onClick={() => {
               setManualWaveMode("corrective");
+              setAutoABCDetection(null);
               updateInteractionMode("manual");
             }}
           >
@@ -2954,23 +3860,6 @@ export function MetalChart({
         >
           Auto-Detect Waves
         </Button>
-
-        {interactionMode === "manual" && manualWaveMode === "corrective" ? (
-          <Button
-            size="sm"
-            variant={showCorrectivePrediction ? "default" : "outline"}
-            className={cn(
-              "h-8 px-3 text-xs",
-              !availableCorrectivePredictionTarget && "opacity-50",
-            )}
-            disabled={!availableCorrectivePredictionTarget}
-            onClick={() =>
-              setShowCorrectivePrediction((currentValue) => !currentValue)
-            }
-          >
-            {showCorrectivePrediction ? "Hide Wave C Forecast" : "Predict Wave C"}
-          </Button>
-        ) : null}
 
         <Button
           size="sm"
@@ -2991,13 +3880,17 @@ export function MetalChart({
           ? pendingLineAnchor
             ? "Line Tool · Click End Point"
             : "Line Tool · Click Start Point"
-          : `${activeWaveLabel} · ${
-              interactionMode === "manual"
-                ? manualWaveMode === "impulse"
+          : interactionMode === "auto"
+            ? waveAnalysis.activePattern === "corrective"
+              ? "Auto ABC Setup"
+              : waveAnalysis.activePattern === "impulse"
+                ? "Auto Impulse Setup"
+                : "Auto Setup"
+            : `${activeWaveLabel} · ${
+                manualWaveMode === "impulse"
                   ? "Click To Plot 5-Wave"
                   : "Click To Plot 3-Wave"
-                : "Auto Overlay"
-            }`}
+              }`}
       </div>
 
       <div className="absolute bottom-3 right-4 z-30 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl">
@@ -3339,7 +4232,7 @@ export function MetalChart({
                 fontWeight="700"
                 textAnchor="middle"
               >
-                {overlayGeometry.retracementBarrier.label}
+                {truncateOverlayText(overlayGeometry.retracementBarrier.label, 24)}
               </text>
             </g>
           ) : null}
@@ -3379,23 +4272,25 @@ export function MetalChart({
             </g>
           ) : null}
 
+          {interactionMode === "auto"
+            ? overlayGeometry.alternateCorrectivePredictions.map((prediction, index) => {
+                const projectionZoneId = `${prediction.id}-alt-${index}`;
+                return hoveredProjectionZoneId === projectionZoneId
+                  ? null
+                  : renderAlternateCorrectivePredictionZone(prediction, index);
+              })
+            : null}
+
           {overlayGeometry.correctivePrediction ? (
             <g>
               {(() => {
                 const prediction = overlayGeometry.correctivePrediction;
                 const zoneTopY = Math.min(prediction.targetY, prediction.startY) - 20;
-                const labelWidth = 188;
-                const labelHeight = 42;
-                const labelX = clamp(
-                  prediction.targetX - labelWidth / 2,
-                  12,
-                  Math.max(overlayGeometry.width - labelWidth - 12, 12),
-                );
-                const labelY = clamp(
-                  zoneTopY - 50,
-                  12,
-                  Math.max(overlayGeometry.height - labelHeight - 12, 12),
-                );
+                const isAutoCorrectiveOverlay = interactionMode === "auto";
+                const compactLabelWidth = 126;
+                const compactLabelHeight = 30;
+                const detailLabelWidth = 188;
+                const detailLabelHeight = 42;
                 const bandTopPrice = Math.max(prediction.zoneLow, prediction.zoneHigh);
                 const bandBottomPrice = Math.min(prediction.zoneLow, prediction.zoneHigh);
                 const bandTopCoordinate = candleSeriesRef.current?.priceToCoordinate(
@@ -3412,6 +4307,39 @@ export function MetalChart({
                   bandTopCoordinate === null || bandBottomCoordinate === null
                     ? prediction.targetY + 12
                     : Math.max(Number(bandTopCoordinate), Number(bandBottomCoordinate));
+                const zoneWidth = isAutoCorrectiveOverlay
+                  ? 92
+                  : Math.max(prediction.targetX - prediction.startX - 20, 48);
+                const zoneX = isAutoCorrectiveOverlay
+                  ? clamp(
+                      prediction.targetX - zoneWidth / 2,
+                      prediction.startX + 28,
+                      Math.max(overlayGeometry.width - zoneWidth - 16, prediction.startX + 28),
+                    )
+                  : prediction.startX + 10;
+                const zoneCenterX = zoneX + zoneWidth / 2;
+                const labelWidth = isAutoCorrectiveOverlay
+                  ? compactLabelWidth
+                  : detailLabelWidth;
+                const labelHeight = isAutoCorrectiveOverlay
+                  ? compactLabelHeight
+                  : detailLabelHeight;
+                const labelX = clamp(
+                  zoneCenterX - labelWidth / 2,
+                  12,
+                  Math.max(overlayGeometry.width - labelWidth - 12, 12),
+                );
+                const labelY = clamp(
+                  zoneTopY - (isAutoCorrectiveOverlay ? 42 : 50),
+                  12,
+                  Math.max(overlayGeometry.height - labelHeight - 12, 12),
+                );
+                const cMarkerX = clamp(
+                  zoneCenterX,
+                  20,
+                  Math.max(overlayGeometry.width - 20, 20),
+                );
+                const cMarkerY = bandTopY - 12;
                 const tooltipLines = [
                   prediction.label,
                   `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
@@ -3428,34 +4356,95 @@ export function MetalChart({
                 return (
                   <>
                     <title>{tooltipLines}</title>
+                    {prediction.channelOverlay ? (
+                      <g opacity={isAutoCorrectiveOverlay ? 0.42 : 0.56}>
+                        <line
+                          x1={prediction.channelOverlay.upperLine.x1}
+                          y1={prediction.channelOverlay.upperLine.y1}
+                          x2={prediction.channelOverlay.upperLine.x2}
+                          y2={prediction.channelOverlay.upperLine.y2}
+                          stroke="rgba(250, 204, 21, 0.46)"
+                          strokeWidth={1}
+                          strokeDasharray="6 8"
+                        />
+                        <line
+                          x1={prediction.channelOverlay.lowerLine.x1}
+                          y1={prediction.channelOverlay.lowerLine.y1}
+                          x2={prediction.channelOverlay.lowerLine.x2}
+                          y2={prediction.channelOverlay.lowerLine.y2}
+                          stroke="rgba(250, 204, 21, 0.46)"
+                          strokeWidth={1}
+                          strokeDasharray="6 8"
+                        />
+                      </g>
+                    ) : null}
                     <rect
-                      x={prediction.startX + 10}
+                      x={zoneX}
                       y={bandTopY}
-                      width={Math.max(prediction.targetX - prediction.startX - 20, 48)}
+                      width={zoneWidth}
                       height={Math.max(bandBottomY - bandTopY, 16)}
                       rx={8}
-                      fill="rgba(234, 179, 8, 0.1)"
+                      fill={isAutoCorrectiveOverlay ? "rgba(234, 179, 8, 0.08)" : "rgba(234, 179, 8, 0.1)"}
                       stroke="rgba(250, 204, 21, 0.28)"
                       strokeWidth={1}
                     />
                     <line
+                      x1={zoneX}
+                      y1={bandTopY}
+                      x2={zoneX + zoneWidth}
+                      y2={bandTopY}
+                      stroke="rgba(250, 204, 21, 0.4)"
+                      strokeWidth={1}
+                      strokeDasharray="3 5"
+                    />
+                    <line
+                      x1={zoneX}
+                      y1={bandBottomY}
+                      x2={zoneX + zoneWidth}
+                      y2={bandBottomY}
+                      stroke="rgba(250, 204, 21, 0.4)"
+                      strokeWidth={1}
+                      strokeDasharray="3 5"
+                    />
+                    <line
                       x1={prediction.startX}
                       y1={prediction.startY}
-                      x2={prediction.targetX}
+                      x2={zoneCenterX}
                       y2={prediction.targetY}
-                      stroke="rgba(250, 204, 21, 0.82)"
-                      strokeWidth={1.8}
-                      strokeDasharray="5 6"
+                      stroke={isAutoCorrectiveOverlay ? "rgba(250, 204, 21, 0.72)" : "rgba(250, 204, 21, 0.82)"}
+                      strokeWidth={isAutoCorrectiveOverlay ? 1.4 : 1.8}
+                      strokeDasharray={isAutoCorrectiveOverlay ? "4 6" : "5 6"}
                       strokeLinecap="round"
                     />
                     <circle
-                      cx={prediction.targetX}
+                      cx={zoneCenterX}
                       cy={prediction.targetY}
-                      r={5}
+                      r={isAutoCorrectiveOverlay ? 4.5 : 5}
                       fill="#06111f"
                       stroke="#fde047"
                       strokeWidth={1.8}
                     />
+                    {isAutoCorrectiveOverlay ? (
+                      <>
+                        <circle
+                          cx={cMarkerX}
+                          cy={cMarkerY}
+                          r={10}
+                          fill="rgba(12, 18, 31, 0.92)"
+                          stroke="rgba(250, 204, 21, 0.34)"
+                        />
+                        <text
+                          x={cMarkerX}
+                          y={cMarkerY + 3.5}
+                          fill="#fde047"
+                          fontSize="11"
+                          fontWeight="700"
+                          textAnchor="middle"
+                        >
+                          C?
+                        </text>
+                      </>
+                    ) : null}
                     <rect
                       x={labelX}
                       y={labelY}
@@ -3467,39 +4456,83 @@ export function MetalChart({
                     />
                     <text
                       x={labelX + labelWidth / 2}
-                      y={labelY + 13}
+                      y={labelY + (isAutoCorrectiveOverlay ? 12 : 13)}
                       fill="#fde047"
-                      fontSize="9.4"
+                      fontSize={isAutoCorrectiveOverlay ? "9.1" : "9.4"}
                       fontWeight="700"
                       textAnchor="middle"
                     >
-                      {prediction.label}
+                      {isAutoCorrectiveOverlay ? "Wave C Zone" : prediction.label}
                     </text>
-                    <text
-                      x={labelX + labelWidth / 2}
-                      y={labelY + 24}
-                      fill="#fef08a"
-                      fontSize="8.9"
-                      fontWeight="600"
-                      textAnchor="middle"
-                    >
-                      {`Confidence: ${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}%`}
-                    </text>
-                    <text
-                      x={labelX + labelWidth / 2}
-                      y={labelY + 35}
-                      fill="#fde68a"
-                      fontSize="8.25"
-                      fontWeight="500"
-                      textAnchor="middle"
-                    >
-                      {truncateOverlayText(prediction.reasonSummary, 34)}
-                    </text>
+                    {isAutoCorrectiveOverlay ? (
+                      <text
+                        x={labelX + labelWidth / 2}
+                        y={labelY + 23}
+                        fill="#fef08a"
+                        fontSize="8.6"
+                        fontWeight="600"
+                        textAnchor="middle"
+                      >
+                        {`${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}% Fibonacci`}
+                      </text>
+                    ) : (
+                      <>
+                        <text
+                          x={labelX + labelWidth / 2}
+                          y={labelY + 24}
+                          fill="#fef08a"
+                          fontSize="8.9"
+                          fontWeight="600"
+                          textAnchor="middle"
+                        >
+                          {`Confidence: ${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}%`}
+                        </text>
+                        <text
+                          x={labelX + labelWidth / 2}
+                          y={labelY + 35}
+                          fill="#fde68a"
+                          fontSize="8.25"
+                          fontWeight="500"
+                          textAnchor="middle"
+                        >
+                          {truncateOverlayText(prediction.reasonSummary, 34)}
+                        </text>
+                      </>
+                    )}
                   </>
                 );
               })()}
             </g>
           ) : null}
+
+          {overlayGeometry.correctivePrediction
+            ? renderPrimaryCorrectivePredictionHitbox(
+                overlayGeometry.correctivePrediction,
+              )
+            : null}
+
+          {interactionMode === "auto"
+            ? overlayGeometry.alternateCorrectivePredictions.map((prediction, index) =>
+                renderAlternateCorrectivePredictionHitbox(prediction, index),
+              )
+            : null}
+
+          {interactionMode === "auto" && hoveredProjectionZoneId
+            ? overlayGeometry.alternateCorrectivePredictions.map((prediction, index) => {
+                const projectionZoneId = `${prediction.id}-alt-${index}`;
+                return hoveredProjectionZoneId === projectionZoneId
+                  ? renderAlternateCorrectivePredictionZone(prediction, index, true)
+                  : null;
+              })
+            : null}
+
+          {hoveredProjectionZoneId === primaryCorrectiveProjectionZoneId &&
+          overlayGeometry.correctivePrediction
+            ? renderPrimaryCorrectivePredictionZone(
+                overlayGeometry.correctivePrediction,
+                true,
+              )
+            : null}
 
           {overlayGeometry.fibonacciLevels.map((level) => (
             <g key={level.id}>

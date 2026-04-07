@@ -27,6 +27,7 @@ import {
   type ReactionValidationItem,
   type WaveReactionAnalysis,
 } from "@/lib/elliottReactionEngine";
+import type { ABCImprovedScenario } from "@/lib/elliottABCEngine";
 import {
   CORRECTIVE_LABELS,
   sortWavePoints,
@@ -49,6 +50,7 @@ type WaveAnalysisPanelData = {
   validation: WaveValidationResult | null;
   impulseValidation?: WaveValidationResult | null;
   correctiveValidation?: WaveValidationResult | null;
+  abcScenarios?: ABCImprovedScenario[];
 };
 
 export type WaveAnalysisPanelProps = {
@@ -389,6 +391,8 @@ export function WaveAnalysisPanel({
   );
   const primaryZone = reactionAnalysis?.primaryZone ?? null;
   const alternateZone = reactionAnalysis?.alternateZones[0] ?? null;
+  const abcScenarios = waveAnalysis?.abcScenarios ?? [];
+  const primaryABCScenario = abcScenarios[0] ?? null;
   const sortedWavePoints = useMemo(() => sortWavePoints(wavePoints), [wavePoints]);
   const projectionTargets = useMemo(
     () => buildProjectionTargets(activeCount),
@@ -451,10 +455,14 @@ export function WaveAnalysisPanel({
             <div
               className={cn(
                 "rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.08em]",
-                getConfidenceTone(primaryZone?.confidenceLabel ?? null),
+                primaryABCScenario
+                  ? "border-amber-300/25 bg-amber-300/10 text-amber-100"
+                  : getConfidenceTone(primaryZone?.confidenceLabel ?? null),
               )}
             >
-              {primaryZone
+              {primaryABCScenario
+                ? `ABC confidence · ${primaryABCScenario.confidence}%`
+                : primaryZone
                 ? `${primaryZone.confidenceLabel} confidence${confidencePercent !== null ? ` · ${confidencePercent}%` : ""}`
                 : "Awaiting scored zone"}
             </div>
@@ -490,31 +498,92 @@ export function WaveAnalysisPanel({
 
       <CardContent className="flex flex-1 flex-col gap-4 overflow-y-auto pt-5">
         <div className="rounded-[20px] border border-white/8 bg-[linear-gradient(180deg,rgba(20,31,52,0.92),rgba(10,16,29,0.88))] p-4">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col gap-3">
             <div>
               <p className="text-[11px] uppercase tracking-[0.3em] text-primary/80">
                 Current Count
               </p>
               <h3 className="mt-2 text-base font-semibold text-foreground">
-                {buildHeadline(activeCount)}
+                {primaryABCScenario ? primaryABCScenario.name : buildHeadline(activeCount)}
               </h3>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                {buildSubheadline(activeCount)}
+                {primaryABCScenario ? primaryABCScenario.label : buildSubheadline(activeCount)}
               </p>
             </div>
 
-            <div className="rounded-2xl border border-white/8 bg-black/20 px-3 py-2 text-right">
+            <div className="w-full max-w-[168px] rounded-2xl border border-white/8 bg-black/20 px-3 py-2">
               <p className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
                 Live Context
               </p>
-              <p className="mt-1 text-base font-semibold text-foreground">
-                {reactionAnalysis ? currentWaveLabel : activeWaveLabel ? `Wave ${activeWaveLabel}` : "Not set"}
+              <p className="mt-1 break-words text-base font-semibold leading-tight text-foreground">
+                {primaryABCScenario
+                  ? "Wave C"
+                  : reactionAnalysis
+                    ? currentWaveLabel
+                    : activeWaveLabel
+                      ? `Wave ${activeWaveLabel}`
+                      : "Not set"}
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {reactionAnalysis ? capitalize(reactionAnalysis.reactionType) : "Waiting"}
+              <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
+                {primaryABCScenario
+                  ? `Invalidation $${formatPrice(primaryABCScenario.invalidationLevel, pricePrecision)}`
+                  : reactionAnalysis
+                    ? capitalize(reactionAnalysis.reactionType)
+                    : "Waiting"}
               </p>
             </div>
           </div>
+
+          {abcScenarios.length > 0 ? (
+            <div className="mt-4 rounded-2xl border border-amber-300/18 bg-amber-300/8 p-3">
+              <p className="text-[11px] uppercase tracking-[0.24em] text-amber-100/80">
+                Institutional ABC Stack
+              </p>
+              <div className="mt-3 space-y-2">
+                {abcScenarios.slice(0, 3).map((scenario) => (
+                  <div
+                    key={`summary-${scenario.id}`}
+                    className="flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/15 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium leading-5 text-foreground">
+                        {scenario.primary ? "Primary" : `Alt ${scenario.id}`} · {scenario.name}
+                      </p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        Invalidation ${formatPrice(scenario.invalidationLevel, pricePrecision)}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-xs font-semibold text-amber-100">
+                      {scenario.confidence}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {primaryABCScenario?.targets.length ? (
+                <div className="mt-3 rounded-xl border border-white/8 bg-black/15 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Wave C Target Odds
+                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {primaryABCScenario.targets.slice(0, 4).map((target) => (
+                      <div
+                        key={`summary-target-${target.fibRatio}-${target.price}`}
+                        className="flex items-center justify-between gap-3 text-xs"
+                      >
+                        <span className="font-medium text-foreground">{target.fibRatio}</span>
+                        <span className="text-muted-foreground">
+                          ${formatPrice(target.price, pricePrecision)}
+                        </span>
+                        <span className="font-semibold text-amber-100">
+                          {target.probability}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {alternateCount ? (
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/12 bg-primary/6 px-3 py-3">
@@ -549,8 +618,8 @@ export function WaveAnalysisPanel({
 
         {activeTab === "analysis" ? (
           <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+            <div className="grid grid-cols-1 gap-3">
+              <div className="min-w-0 rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
                   {activeCount?.direction === "bearish" ? (
                     <TrendingDown className="h-4 w-4 text-rose-300" />
@@ -559,40 +628,40 @@ export function WaveAnalysisPanel({
                   )}
                   <p className="text-sm font-medium text-foreground">Trend Bias</p>
                 </div>
-                <p className="mt-3 text-xl font-semibold text-foreground">
+                <p className="mt-3 break-words text-lg font-semibold leading-tight text-foreground">
                   {activeCount ? capitalize(activeCount.direction) : "Neutral"}
                 </p>
-                <p className="mt-1 text-sm text-muted-foreground">
+                <p className="mt-1 break-words text-sm leading-6 text-muted-foreground">
                   {activeCount
                     ? `${capitalize(activeCount.pattern)} structure with ${DEGREE_LABELS[activeCount.degree].toLowerCase()}-degree pivots`
                     : "Waiting for enough wave points to define structure."}
                 </p>
               </div>
 
-              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+              <div className="min-w-0 rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
                   <Target className="h-4 w-4 text-primary" />
                   <p className="text-sm font-medium text-foreground">Reaction Context</p>
                 </div>
-                <p className="mt-3 text-xl font-semibold text-foreground">
+                <p className="mt-3 break-words text-lg font-semibold leading-tight text-foreground">
                   {reactionAnalysis ? capitalize(reactionAnalysis.reactionType) : "Pending"}
                 </p>
-                <p className="mt-1 text-sm text-muted-foreground">
+                <p className="mt-1 break-words text-sm leading-6 text-muted-foreground">
                   {reactionAnalysis
                     ? `${currentWaveLabel} is being scored as a ${reactionAnalysis.reactionType} zone.`
                     : "Add more pivots to identify the next actionable reaction cluster."}
                 </p>
               </div>
 
-              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+              <div className="min-w-0 rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
                   <Radar className="h-4 w-4 text-primary" />
                   <p className="text-sm font-medium text-foreground">Rule Validation</p>
                 </div>
-                <p className="mt-3 text-xl font-semibold text-foreground">
+                <p className="mt-3 break-words text-lg font-semibold leading-tight text-foreground">
                   {ruleCount ? `${ruleCount} checks` : "No checks yet"}
                 </p>
-                <p className="mt-1 text-sm text-muted-foreground">
+                <p className="mt-1 break-words text-sm leading-6 text-muted-foreground">
                   {reactionAnalysis
                     ? summarizeChecklist(hardRules)
                     : "Complete more of the sequence to unlock the full Elliott checklist."}
@@ -625,7 +694,7 @@ export function WaveAnalysisPanel({
 
               {primaryZone ? (
                 <>
-                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="mt-4 grid grid-cols-1 gap-3">
                     <div className="rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
                       <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
                         Zone Range
@@ -690,7 +759,7 @@ export function WaveAnalysisPanel({
               ) : null}
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3">
               <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
                   <Layers3 className="h-4 w-4 text-primary" />
@@ -746,7 +815,7 @@ export function WaveAnalysisPanel({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4">
               <div className="space-y-3">
                 <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
                   <p className="text-sm font-medium text-foreground">Hard Rules</p>
@@ -969,6 +1038,99 @@ export function WaveAnalysisPanel({
                 <p className="mt-1 text-sm leading-6 text-muted-foreground/80">
                   {reactionAnalysis.invalidation.explanation}
                 </p>
+              </div>
+            ) : null}
+
+            {primaryABCScenario ? (
+              <div className="rounded-2xl border border-amber-300/18 bg-amber-300/8 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">
+                      Wave C Probability Table
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                      {primaryABCScenario.label}
+                    </p>
+                  </div>
+                  <Badge className="border border-amber-300/20 bg-amber-300/10 text-amber-100 hover:bg-amber-300/10">
+                    {primaryABCScenario.confidence}%
+                  </Badge>
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  {primaryABCScenario.targets.map((target) => (
+                    <div
+                      key={`${target.fibRatio}-${target.price}`}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/15 px-3 py-2"
+                    >
+                      <div>
+                        <p className="text-sm font-medium text-foreground">
+                          {target.fibRatio}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Wave C objective
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-semibold text-foreground">
+                          ${formatPrice(target.price, pricePrecision)}
+                        </p>
+                        <p className="text-xs text-amber-100">
+                          {target.probability}% probability
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                  Invalidation: ${formatPrice(primaryABCScenario.invalidationLevel, pricePrecision)}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  Momentum/volume filter: {Math.round(primaryABCScenario.momentumScore)} / {Math.round(primaryABCScenario.volumeScore)}
+                </p>
+              </div>
+            ) : null}
+
+            {abcScenarios.length > 0 ? (
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <p className="text-sm font-semibold text-foreground">
+                  Top 3 Auto Scenarios
+                </p>
+                <div className="mt-3 space-y-2">
+                  {abcScenarios.slice(0, 3).map((scenario) => (
+                    <div
+                      key={scenario.id}
+                      className="rounded-xl border border-white/8 bg-black/15 px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-foreground">
+                          {scenario.primary ? "Primary" : `Alt ${scenario.id}`} · {scenario.name}
+                        </p>
+                        <span className="text-xs font-semibold text-amber-100">
+                          {scenario.confidence}%
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {scenario.reason}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+                        {scenario.label}
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
+                          Invalidation: ${formatPrice(scenario.invalidationLevel, pricePrecision)}
+                        </span>
+                        <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
+                          Momentum {Math.round(scenario.momentumScore)}
+                        </span>
+                        <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
+                          Volume {Math.round(scenario.volumeScore)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : null}
 
