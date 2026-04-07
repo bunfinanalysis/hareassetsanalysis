@@ -16,6 +16,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { Pencil } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -90,6 +91,8 @@ type OverlayGeometry = {
   draftResistanceZone: OverlayResistanceZone | null;
   userLines: OverlayUserDrawnLine[];
   pendingLineAnchor: OverlayPendingLineAnchor | null;
+  freehandDrawings: OverlayFreehandDrawing[];
+  draftFreehandDrawing: OverlayFreehandDrawing | null;
   pendingResistanceZoneAnchor: OverlayPendingResistanceZoneAnchor | null;
   fibonacciLevels: Array<FibonacciLevel & { y: number }>;
   probabilityZones: OverlayProbabilityZone[];
@@ -178,6 +181,20 @@ type OverlayUserDrawnLine = UserDrawnLine & {
   y1: number;
   x2: number;
   y2: number;
+};
+
+type FreehandDrawingPoint = {
+  x: number;
+  y: number;
+};
+
+type FreehandDrawing = {
+  id: string;
+  points: FreehandDrawingPoint[];
+};
+
+type OverlayFreehandDrawing = FreehandDrawing & {
+  path: string;
 };
 
 type PendingLineAnchor = {
@@ -271,6 +288,7 @@ type OverlayPriceExtents = {
 const IMPULSE_COLOR = "#3b82f6";
 const CORRECTIVE_COLOR = "#f59e0b";
 const DRAW_LINE_COLOR = "#a855f7";
+const FREEHAND_DRAW_COLOR = "#ec4899";
 const RESISTANCE_ZONE_FILL = "rgba(249, 115, 22, 0.18)";
 const RESISTANCE_ZONE_STROKE = "rgba(251, 146, 60, 0.72)";
 const FIB_LINE_COLOR = "rgba(216, 168, 77, 0.6)";
@@ -285,6 +303,8 @@ const EMPTY_OVERLAY: OverlayGeometry = {
   draftResistanceZone: null,
   userLines: [],
   pendingLineAnchor: null,
+  freehandDrawings: [],
+  draftFreehandDrawing: null,
   pendingResistanceZoneAnchor: null,
   fibonacciLevels: [],
   probabilityZones: [],
@@ -430,6 +450,50 @@ function getNearestCandleByX(
   }
 
   return nearestCandle;
+}
+
+function getNearestCandleByTime(candles: Candle[], time: number) {
+  if (candles.length === 0) {
+    return null;
+  }
+
+  let nearestCandle = candles[0];
+  let smallestDistance = Math.abs(candles[0].time - time);
+
+  for (const candle of candles.slice(1)) {
+    const distance = Math.abs(candle.time - time);
+
+    if (distance < smallestDistance) {
+      smallestDistance = distance;
+      nearestCandle = candle;
+    }
+  }
+
+  return nearestCandle;
+}
+
+function timeToCoordinateWithFallback(
+  chart: IChartApi,
+  candles: Candle[],
+  time: number,
+) {
+  const directCoordinate = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
+
+  if (directCoordinate !== null) {
+    return Number(directCoordinate);
+  }
+
+  const nearestCandle = getNearestCandleByTime(candles, time);
+
+  if (!nearestCandle) {
+    return null;
+  }
+
+  const fallbackCoordinate = chart.timeScale().timeToCoordinate(
+    nearestCandle.time as UTCTimestamp,
+  );
+
+  return fallbackCoordinate === null ? null : Number(fallbackCoordinate);
 }
 
 function formatDegreeLabel(
@@ -777,6 +841,20 @@ function createProbabilityZoneTarget(
 function formatOverlayPrice(price: number) {
   const decimals = price >= 100 ? 2 : 3;
   return price.toFixed(decimals);
+}
+
+function buildFreehandDrawingPath(points: FreehandDrawingPoint[]) {
+  if (points.length === 0) {
+    return "";
+  }
+
+  const [firstPoint, ...remainingPoints] = points;
+  return [
+    `M ${firstPoint.x.toFixed(2)} ${firstPoint.y.toFixed(2)}`,
+    ...remainingPoints.map(
+      (point) => `L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
+    ),
+  ].join(" ");
 }
 
 function normalizePriceForYAxisLabel(price: number, symbol: MetalSymbolCode) {
@@ -1317,8 +1395,11 @@ function buildOverlayGeometry(
   draftResistanceZone: ResistanceZone | null,
   pendingResistanceZoneAnchor: number | null,
   retracementBarrierTarget: RetracementBarrierTarget | null,
+  candles: Candle[],
   drawnLines: UserDrawnLine[],
   pendingLineAnchor: PendingLineAnchor | null,
+  freehandDrawings: FreehandDrawing[],
+  draftFreehandDrawing: FreehandDrawing | null,
 ) {
   const chartHeight = container.clientHeight;
   const impulseDirection = inferDirectionFromSequence(analysis.impulsePoints);
@@ -1387,9 +1468,9 @@ function buildOverlayGeometry(
       );
   const userLines = drawnLines
     .map<OverlayUserDrawnLine | null>((line) => {
-      const x1 = chart.timeScale().timeToCoordinate(line.startTime as UTCTimestamp);
+      const x1 = timeToCoordinateWithFallback(chart, candles, line.startTime);
       const y1 = series.priceToCoordinate(line.startPrice);
-      const x2 = chart.timeScale().timeToCoordinate(line.endTime as UTCTimestamp);
+      const x2 = timeToCoordinateWithFallback(chart, candles, line.endTime);
       const y2 = series.priceToCoordinate(line.endPrice);
 
       if (x1 === null || y1 === null || x2 === null || y2 === null) {
@@ -1410,7 +1491,7 @@ function buildOverlayGeometry(
       return null;
     }
 
-    const x = chart.timeScale().timeToCoordinate(pendingLineAnchor.time as UTCTimestamp);
+      const x = timeToCoordinateWithFallback(chart, candles, pendingLineAnchor.time);
     const y = series.priceToCoordinate(pendingLineAnchor.price);
 
     if (x === null || y === null) {
@@ -1423,6 +1504,24 @@ function buildOverlayGeometry(
       y: Number(y),
     };
   })();
+  const toOverlayFreehandDrawing = (drawing: FreehandDrawing) => {
+    if (drawing.points.length < 2) {
+      return null;
+    }
+
+    return {
+      ...drawing,
+      path: buildFreehandDrawingPath(drawing.points),
+    } satisfies OverlayFreehandDrawing;
+  };
+  const overlayFreehandDrawings = freehandDrawings
+    .map<OverlayFreehandDrawing | null>((drawing) => toOverlayFreehandDrawing(drawing))
+    .filter(
+      (drawing): drawing is OverlayFreehandDrawing => drawing !== null,
+    );
+  const overlayDraftFreehandDrawing = draftFreehandDrawing
+    ? toOverlayFreehandDrawing(draftFreehandDrawing)
+    : null;
   const overlayPendingResistanceZoneAnchor = (() => {
     if (typeof pendingResistanceZoneAnchor !== "number") {
       return null;
@@ -1628,6 +1727,8 @@ function buildOverlayGeometry(
     draftResistanceZone: overlayDraftResistanceZone,
     userLines,
     pendingLineAnchor: overlayPendingLineAnchor,
+    freehandDrawings: overlayFreehandDrawings,
+    draftFreehandDrawing: overlayDraftFreehandDrawing,
     pendingResistanceZoneAnchor: overlayPendingResistanceZoneAnchor,
     fibonacciLevels,
     probabilityZones,
@@ -1677,6 +1778,45 @@ function buildGeometryFingerprint(geometry: OverlayGeometry) {
       ? [
           Math.round(geometry.pendingLineAnchor.x),
           Math.round(geometry.pendingLineAnchor.y),
+        ]
+      : null,
+    freehandDrawings: geometry.freehandDrawings.map((drawing) => [
+      drawing.id,
+      drawing.points.length,
+      drawing.points
+        .slice(0, 5)
+        .map((point) => [Math.round(point.x), Math.round(point.y)]),
+      drawing.points.length > 5
+        ? [
+            Math.round(drawing.points[drawing.points.length - 1].x),
+            Math.round(drawing.points[drawing.points.length - 1].y),
+          ]
+        : null,
+    ]),
+    draftFreehandDrawing: geometry.draftFreehandDrawing
+      ? [
+          geometry.draftFreehandDrawing.id,
+          geometry.draftFreehandDrawing.points.length,
+          geometry.draftFreehandDrawing.points.length > 0
+            ? [
+                Math.round(geometry.draftFreehandDrawing.points[0].x),
+                Math.round(geometry.draftFreehandDrawing.points[0].y),
+              ]
+            : null,
+          geometry.draftFreehandDrawing.points.length > 1
+            ? [
+                Math.round(
+                  geometry.draftFreehandDrawing.points[
+                    geometry.draftFreehandDrawing.points.length - 1
+                  ].x,
+                ),
+                Math.round(
+                  geometry.draftFreehandDrawing.points[
+                    geometry.draftFreehandDrawing.points.length - 1
+                  ].y,
+                ),
+              ]
+            : null,
         ]
       : null,
     pendingResistanceZoneAnchor: geometry.pendingResistanceZoneAnchor
@@ -1966,12 +2106,16 @@ export function MetalChart({
   const [manualWaveMode, setManualWaveMode] = useState<ManualWaveMode>("impulse");
   const [showCorrectivePrediction, setShowCorrectivePrediction] = useState(false);
   const [isDrawLineMode, setIsDrawLineMode] = useState(false);
+  const [isPencilDrawMode, setIsPencilDrawMode] = useState(false);
   const [isResistanceMode, setIsResistanceMode] = useState(false);
   const [resistanceZones, setResistanceZones] = useState<ResistanceZone[]>([]);
   const [draftResistanceZone, setDraftResistanceZone] = useState<ResistanceZone | null>(null);
   const [pendingResistanceZoneAnchor, setPendingResistanceZoneAnchor] = useState<number | null>(null);
   const [drawnLines, setDrawnLines] = useState<UserDrawnLine[]>([]);
   const [pendingLineAnchor, setPendingLineAnchor] = useState<PendingLineAnchor | null>(null);
+  const [freehandDrawings, setFreehandDrawings] = useState<FreehandDrawing[]>([]);
+  const [draftFreehandDrawing, setDraftFreehandDrawing] =
+    useState<FreehandDrawing | null>(null);
   const [internalWavePoints, setInternalWavePoints] = useState<WavePoint[]>([]);
   const [alternateWaveCount, setAlternateWaveCount] = useState<WaveCount | null>(null);
   const [alternateWaveValidation, setAlternateWaveValidation] =
@@ -2007,6 +2151,7 @@ export function MetalChart({
   const publishedWaveAnalysisSignatureRef = useRef<string | null>(null);
   const isWavePointsControlled = controlledWavePoints !== undefined;
   const isInteractionModeControlled = controlledInteractionMode !== undefined;
+  const draftFreehandDrawingRef = useRef<FreehandDrawing | null>(null);
 
   useEffect(() => {
     candlesRef.current = candles;
@@ -2523,6 +2668,108 @@ export function MetalChart({
     [stopResistanceZoneInteraction],
   );
 
+  const getLocalFreehandPoint = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const bounds = event.currentTarget.getBoundingClientRect();
+
+      return {
+        x: clamp(event.clientX - bounds.left, 0, bounds.width),
+        y: clamp(event.clientY - bounds.top, 0, bounds.height),
+      } satisfies FreehandDrawingPoint;
+    },
+    [],
+  );
+
+  const appendFreehandPoint = useCallback((point: FreehandDrawingPoint) => {
+    const currentDrawing = draftFreehandDrawingRef.current;
+
+    if (!currentDrawing) {
+      return;
+    }
+
+    const previousPoint = currentDrawing.points[currentDrawing.points.length - 1];
+    const distanceFromPreviousPoint = previousPoint
+      ? Math.hypot(point.x - previousPoint.x, point.y - previousPoint.y)
+      : Number.POSITIVE_INFINITY;
+
+    if (distanceFromPreviousPoint < 1.8) {
+      return;
+    }
+
+    const nextDrawing = {
+      ...currentDrawing,
+      points: [...currentDrawing.points, point],
+    };
+
+    draftFreehandDrawingRef.current = nextDrawing;
+    setDraftFreehandDrawing(nextDrawing);
+  }, []);
+
+  const handlePencilOverlayPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!isPencilDrawMode) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const point = getLocalFreehandPoint(event);
+      const nextDrawing = {
+        id: `freehand-drawing-${Date.now()}-${Math.round(Math.random() * 100000)}`,
+        points: [point],
+      } satisfies FreehandDrawing;
+
+      event.currentTarget.setPointerCapture(event.pointerId);
+      draftFreehandDrawingRef.current = nextDrawing;
+      setDraftFreehandDrawing(nextDrawing);
+    },
+    [getLocalFreehandPoint, isPencilDrawMode],
+  );
+
+  const handlePencilOverlayPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!isPencilDrawMode || !draftFreehandDrawingRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      appendFreehandPoint(getLocalFreehandPoint(event));
+    },
+    [appendFreehandPoint, getLocalFreehandPoint, isPencilDrawMode],
+  );
+
+  const handlePencilOverlayPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!draftFreehandDrawingRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      appendFreehandPoint(getLocalFreehandPoint(event));
+
+      const completedDrawing = draftFreehandDrawingRef.current;
+
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      if (completedDrawing && completedDrawing.points.length > 1) {
+        setFreehandDrawings((currentDrawings) => [
+          ...currentDrawings,
+          completedDrawing,
+        ]);
+      }
+
+      draftFreehandDrawingRef.current = null;
+      setDraftFreehandDrawing(null);
+    },
+    [appendFreehandPoint, getLocalFreehandPoint],
+  );
+
   const handleAutoDetectWaves = useCallback(() => {
     if (resistanceZoneInteractionRef.current) {
       stopResistanceZoneInteraction();
@@ -2542,7 +2789,12 @@ export function MetalChart({
 
     updateInteractionMode("auto");
     setShowCorrectivePrediction(false);
+    setIsDrawLineMode(false);
+    setPendingLineAnchor(null);
     setIsResistanceMode(false);
+    setIsPencilDrawMode(false);
+    setDraftFreehandDrawing(null);
+    draftFreehandDrawingRef.current = null;
     setDraftResistanceZone(null);
     setPendingResistanceZoneAnchor(null);
     setAutoABCDetection(detection.abcImprovedDetection ?? null);
@@ -2570,6 +2822,9 @@ export function MetalChart({
     updateInteractionMode("manual");
     setShowCorrectivePrediction(false);
     setIsResistanceMode(false);
+    setIsPencilDrawMode(false);
+    setDraftFreehandDrawing(null);
+    draftFreehandDrawingRef.current = null;
     setDraftResistanceZone(null);
     setPendingResistanceZoneAnchor(null);
     setDraggingPointId(null);
@@ -2589,6 +2844,7 @@ export function MetalChart({
         interactionModeRef.current !== "manual" ||
         dragPointIdRef.current ||
         resistanceZoneInteractionRef.current ||
+        isPencilDrawMode ||
         isResistanceMode
       ) {
         return;
@@ -2663,6 +2919,7 @@ export function MetalChart({
     },
     [
       isDrawLineMode,
+      isPencilDrawMode,
       isResistanceMode,
       manualWaveMode,
       pendingLineAnchor,
@@ -2772,6 +3029,7 @@ export function MetalChart({
       if (
         interactionModeRef.current !== "manual" ||
         isDrawLineMode ||
+        isPencilDrawMode ||
         isResistanceMode
       ) {
         return;
@@ -2784,7 +3042,7 @@ export function MetalChart({
       window.addEventListener("pointermove", handlePointerMove);
       window.addEventListener("pointerup", stopDragging);
     },
-    [handlePointerMove, isDrawLineMode, isResistanceMode, stopDragging],
+    [handlePointerMove, isDrawLineMode, isPencilDrawMode, isResistanceMode, stopDragging],
   );
 
   const startResistanceZoneInteraction = useCallback(
@@ -2856,9 +3114,13 @@ export function MetalChart({
     updateInteractionModeActionRef.current?.("manual");
     setShowCorrectivePrediction(false);
     setIsDrawLineMode(false);
+    setIsPencilDrawMode(false);
     setIsResistanceMode(false);
     setDrawnLines([]);
     setPendingLineAnchor(null);
+    setFreehandDrawings([]);
+    setDraftFreehandDrawing(null);
+    draftFreehandDrawingRef.current = null;
     setDraftResistanceZone(null);
     setPendingResistanceZoneAnchor(null);
     resetAlternateCountRef.current?.();
@@ -3110,6 +3372,8 @@ export function MetalChart({
       !draftResistanceZone &&
       drawnLines.length === 0 &&
       !pendingLineAnchor &&
+      freehandDrawings.length === 0 &&
+      !draftFreehandDrawing &&
       typeof pendingResistanceZoneAnchor !== "number" &&
       (waveAnalysis.validation?.fibonacciLevels.length ?? 0) === 0 &&
       probabilityZoneTargets.length === 0 &&
@@ -3124,6 +3388,8 @@ export function MetalChart({
         currentGeometry.draftResistanceZone === null &&
         currentGeometry.userLines.length === 0 &&
         currentGeometry.pendingLineAnchor === null &&
+        currentGeometry.freehandDrawings.length === 0 &&
+        currentGeometry.draftFreehandDrawing === null &&
         currentGeometry.pendingResistanceZoneAnchor === null &&
         currentGeometry.fibonacciLevels.length === 0 &&
         currentGeometry.probabilityZones.length === 0 &&
@@ -3155,8 +3421,11 @@ export function MetalChart({
         draftResistanceZone,
         pendingResistanceZoneAnchor,
         retracementBarrierTarget,
+        candles,
         drawnLines,
         pendingLineAnchor,
+        freehandDrawings,
+        draftFreehandDrawing,
       );
       const nextFingerprint = buildGeometryFingerprint(nextGeometry);
 
@@ -3202,9 +3471,12 @@ export function MetalChart({
     };
   }, [
     alternateCorrectivePredictionTargets,
+    candles,
     correctivePredictionTarget,
     draftResistanceZone,
+    draftFreehandDrawing,
     drawnLines,
+    freehandDrawings,
     pendingResistanceZoneAnchor,
     pendingLineAnchor,
     probabilityZoneTargets,
@@ -3242,6 +3514,31 @@ export function MetalChart({
 
       return nextValue;
     });
+    setIsPencilDrawMode(false);
+    setDraftFreehandDrawing(null);
+    draftFreehandDrawingRef.current = null;
+    setIsResistanceMode(false);
+    setDraftResistanceZone(null);
+    setPendingResistanceZoneAnchor(null);
+  }, [stopResistanceZoneInteraction]);
+
+  const handleTogglePencilDrawMode = useCallback(() => {
+    if (resistanceZoneInteractionRef.current) {
+      stopResistanceZoneInteraction();
+    }
+
+    setIsPencilDrawMode((currentValue) => {
+      const nextValue = !currentValue;
+
+      if (!nextValue) {
+        setDraftFreehandDrawing(null);
+        draftFreehandDrawingRef.current = null;
+      }
+
+      return nextValue;
+    });
+    setIsDrawLineMode(false);
+    setPendingLineAnchor(null);
     setIsResistanceMode(false);
     setDraftResistanceZone(null);
     setPendingResistanceZoneAnchor(null);
@@ -3250,7 +3547,11 @@ export function MetalChart({
   const handleDeleteLines = useCallback(() => {
     setDrawnLines([]);
     setPendingLineAnchor(null);
+    setFreehandDrawings([]);
+    setDraftFreehandDrawing(null);
+    draftFreehandDrawingRef.current = null;
     setIsDrawLineMode(false);
+    setIsPencilDrawMode(false);
   }, []);
 
   const handleToggleResistanceMode = useCallback(() => {
@@ -3270,6 +3571,9 @@ export function MetalChart({
     });
     setIsDrawLineMode(false);
     setPendingLineAnchor(null);
+    setIsPencilDrawMode(false);
+    setDraftFreehandDrawing(null);
+    draftFreehandDrawingRef.current = null;
   }, [stopResistanceZoneInteraction]);
 
   const handleClearResistanceZones = useCallback(() => {
@@ -3876,6 +4180,8 @@ export function MetalChart({
           ? typeof pendingResistanceZoneAnchor === "number"
             ? "Resistance Tool · Click Or Drag Bottom"
             : "Resistance Tool · Click Or Drag Zone"
+          : isPencilDrawMode
+            ? "Pencil Tool · Draw Freely"
           : isDrawLineMode
           ? pendingLineAnchor
             ? "Line Tool · Click End Point"
@@ -3925,22 +4231,42 @@ export function MetalChart({
           size="sm"
           variant="outline"
           className={cn(
+            "h-8 px-2.5 text-xs border-pink-400/25 text-pink-200 hover:bg-pink-500/10 hover:text-pink-100",
+            isPencilDrawMode && "bg-pink-500/16 text-pink-100 border-pink-300/40",
+          )}
+          title="Pink pencil drawing tool"
+          aria-label="Pink pencil drawing tool"
+          onClick={handleTogglePencilDrawMode}
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          <span className="sr-only">Pencil Draw</span>
+        </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
+          className={cn(
             "h-8 px-3 text-xs border-violet-400/25 text-violet-200 hover:bg-violet-500/10 hover:text-violet-100",
             isDrawLineMode && "bg-violet-500/16 text-violet-100 border-violet-300/40",
           )}
           onClick={handleToggleDrawLineMode}
         >
-          {isDrawLineMode ? "Drawing Lines" : "Draw Lines"}
+          {isDrawLineMode ? "Lines Active" : "Lines"}
         </Button>
 
         <Button
           size="sm"
           variant="outline"
           className="h-8 px-3 text-xs"
-          disabled={drawnLines.length === 0 && !pendingLineAnchor}
+          disabled={
+            drawnLines.length === 0 &&
+            freehandDrawings.length === 0 &&
+            !pendingLineAnchor &&
+            !draftFreehandDrawing
+          }
           onClick={handleDeleteLines}
         >
-          Delete Lines
+          Delete Drawings
         </Button>
       </div>
 
@@ -3953,6 +4279,15 @@ export function MetalChart({
             onPointerMove={handleResistanceOverlayPointerMove}
             onPointerUp={handleResistanceOverlayPointerUp}
             onPointerCancel={handleResistanceOverlayPointerUp}
+          />
+        ) : null}
+        {isPencilDrawMode ? (
+          <div
+            className="absolute inset-0 z-30 cursor-crosshair touch-none"
+            onPointerDown={handlePencilOverlayPointerDown}
+            onPointerMove={handlePencilOverlayPointerMove}
+            onPointerUp={handlePencilOverlayPointerUp}
+            onPointerCancel={handlePencilOverlayPointerUp}
           />
         ) : null}
 
@@ -4631,6 +4966,33 @@ export function MetalChart({
               </text>
             </g>
           ))}
+
+          {overlayGeometry.freehandDrawings.map((drawing) => (
+            <path
+              key={drawing.id}
+              d={drawing.path}
+              fill="none"
+              stroke={FREEHAND_DRAW_COLOR}
+              strokeWidth={2.4}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.92}
+              pointerEvents="none"
+            />
+          ))}
+
+          {overlayGeometry.draftFreehandDrawing ? (
+            <path
+              d={overlayGeometry.draftFreehandDrawing.path}
+              fill="none"
+              stroke={FREEHAND_DRAW_COLOR}
+              strokeWidth={2.6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.98}
+              pointerEvents="none"
+            />
+          ) : null}
           </svg>
         ) : null}
       </div>
