@@ -6,6 +6,7 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  TickMarkType,
   createChart,
   type AutoscaleInfo,
   type CandlestickData,
@@ -294,6 +295,7 @@ const RESISTANCE_ZONE_STROKE = "rgba(251, 146, 60, 0.72)";
 const FIB_LINE_COLOR = "rgba(216, 168, 77, 0.6)";
 const LABEL_BACKGROUND_FILL = "rgba(6, 17, 31, 0.9)";
 const LABEL_BACKGROUND_STROKE = "rgba(255, 255, 255, 0.08)";
+const CHART_TIME_ZONE = "America/New_York";
 const EMPTY_OVERLAY: OverlayGeometry = {
   width: 0,
   height: 0,
@@ -864,7 +866,7 @@ function normalizePriceForYAxisLabel(price: number, symbol: MetalSymbolCode) {
 
   let normalizedPrice = price;
 
-  if (symbol === "XAGUSD") {
+  if (symbol === "XAGUSD" || symbol === "XCUUSD" || symbol === "XURUSD") {
     while (Math.abs(normalizedPrice) > 1000) {
       normalizedPrice /= 1000;
     }
@@ -898,6 +900,7 @@ function getChartLocalization(symbol: MetalSymbolCode) {
     priceFormatter: (price: number) => formatYAxisPrice(price, symbol),
     tickmarksPriceFormatter: (prices: number[]) =>
       prices.map((price) => formatYAxisPrice(price, symbol)),
+    timeFormatter: (time: Time) => formatChartCrosshairTime(time),
   };
 }
 
@@ -942,6 +945,77 @@ function toFixedAutoPriceExtents(
     max: priceRange.maxPrice,
     fixed: true,
   } satisfies OverlayPriceExtents;
+}
+
+function chartTimeToDate(time: Time) {
+  if (typeof time === "number") {
+    return new Date(time * 1000);
+  }
+
+  if (typeof time === "string") {
+    return new Date(time);
+  }
+
+  return new Date(Date.UTC(time.year, time.month - 1, time.day));
+}
+
+function formatChartTimeTick(time: Time, tickMarkType: TickMarkType) {
+  const date = chartTimeToDate(time);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  if (tickMarkType === TickMarkType.Year) {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: CHART_TIME_ZONE,
+      year: "numeric",
+    }).format(date);
+  }
+
+  if (tickMarkType === TickMarkType.Month) {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: CHART_TIME_ZONE,
+      month: "short",
+    }).format(date);
+  }
+
+  if (tickMarkType === TickMarkType.DayOfMonth) {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: CHART_TIME_ZONE,
+      month: "short",
+      day: "numeric",
+    }).format(date);
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: CHART_TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    ...(tickMarkType === TickMarkType.TimeWithSeconds
+      ? { second: "2-digit" as const }
+      : {}),
+    hour12: false,
+    hourCycle: "h23",
+  }).format(date);
+}
+
+function formatChartCrosshairTime(time: Time) {
+  const date = chartTimeToDate(time);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: CHART_TIME_ZONE,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
 }
 
 function normalizeResistanceZonePrices(topPrice: number, bottomPrice: number) {
@@ -3202,6 +3276,8 @@ export function MetalChart({
         minBarSpacing: 6,
         fixLeftEdge: false,
         fixRightEdge: false,
+        tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) =>
+          formatChartTimeTick(time, tickMarkType),
       },
       localization: getChartLocalization(initialSymbolRef.current),
     });
@@ -3294,6 +3370,8 @@ export function MetalChart({
         barSpacing: timeScaleDisplayConfig.barSpacing,
         minBarSpacing: timeScaleDisplayConfig.minBarSpacing,
         rightOffset: timeScaleDisplayConfig.rightOffset,
+        tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) =>
+          formatChartTimeTick(time, tickMarkType),
       },
     });
   }, [timeframeLabel]);

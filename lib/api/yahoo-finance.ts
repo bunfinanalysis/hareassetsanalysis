@@ -244,23 +244,6 @@ function extractCandles(result: YahooFinanceResult, timeframe: Timeframe): Candl
   return normalized.slice(-timeframeConfig.candleCount);
 }
 
-function applyRealtimePriceToLastCandle(candles: Candle[], price?: number): Candle[] {
-  if (!isFiniteNumber(price) || candles.length === 0) {
-    return candles;
-  }
-
-  const nextCandles = [...candles];
-  const lastCandle = nextCandles[nextCandles.length - 1];
-  nextCandles[nextCandles.length - 1] = {
-    ...lastCandle,
-    close: price,
-    high: Math.max(lastCandle.high, price),
-    low: Math.min(lastCandle.low, price),
-  };
-
-  return nextCandles;
-}
-
 function buildYahooQuote(
   symbol: MetalSymbolCode,
   candles: Candle[],
@@ -363,10 +346,7 @@ function buildMarketSnapshotFromYahooResult(
     throw new Error("Yahoo Finance returned no valid OHLC candles");
   }
 
-  const candles = applyRealtimePriceToLastCandle(
-    extractedCandles,
-    result.meta?.regularMarketPrice,
-  );
+  const candles = extractedCandles;
 
   return {
     symbol,

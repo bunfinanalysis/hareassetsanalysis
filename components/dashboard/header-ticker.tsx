@@ -4,7 +4,12 @@ import { Activity, Coins } from "lucide-react";
 
 import { SymbolSwitcher } from "@/components/dashboard/symbol-switcher";
 import { Badge } from "@/components/ui/badge";
-import { type MarketDataSource, type MetalSymbolCode, type QuoteData } from "@/lib/market-types";
+import {
+  METAL_SYMBOLS,
+  type MarketDataSource,
+  type MetalSymbolCode,
+  type QuoteData,
+} from "@/lib/market-types";
 import {
   cn,
   formatClock,
@@ -66,7 +71,7 @@ export function HeaderTicker({
   selectedSymbol,
   source,
 }: HeaderTickerProps) {
-  const precision = selectedSymbol === "XAGUSD" ? 3 : 2;
+  const precision = METAL_SYMBOLS[selectedSymbol].precision;
   const isPositive = (quote?.changePercent ?? 0) >= 0;
 
   return (
@@ -84,7 +89,7 @@ export function HeaderTicker({
                   HareAssets
                 </h1>
                 <Badge variant="outline" className="border-white/10 text-muted-foreground">
-                  Gold & Silver
+                  Gold, Silver, Platinum, Copper & Uranium
                 </Badge>
                 <Badge className="bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500/12">
                   <Activity className="mr-1.5 h-3.5 w-3.5" />
@@ -92,7 +97,7 @@ export function HeaderTicker({
                 </Badge>
               </div>
               <p className="mt-1 text-sm text-muted-foreground">
-                Real-time Elliott Wave charting workspace for precious metals.
+                Real-time Elliott Wave charting workspace for metals.
               </p>
               <p className="mt-1 text-xs text-muted-foreground/90">
                 Data from Yahoo Finance

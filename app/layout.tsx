@@ -19,7 +19,7 @@ const ibmPlexMono = IBM_Plex_Mono({
 export const metadata: Metadata = {
   title: "HareAssets",
   description:
-    "Professional Elliott Wave analysis workspace for XAUUSD and XAGUSD.",
+    "Professional Elliott Wave analysis workspace for XAUUSD, XAGUSD, XPTUSD, XCUUSD, and XURUSD.",
 };
 
 export default function RootLayout({

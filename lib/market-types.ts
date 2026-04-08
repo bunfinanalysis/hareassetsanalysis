@@ -21,6 +21,39 @@ export const METAL_SYMBOLS = {
     minMove: 0.001,
     basePrice: 73.17,
   },
+  XPTUSD: {
+    code: "XPTUSD",
+    metal: "XPT",
+    currency: "USD",
+    yahooSymbol: "PL=F",
+    label: "Platinum",
+    displayName: "Platinum Spot",
+    precision: 2,
+    minMove: 0.01,
+    basePrice: 1958.5,
+  },
+  XCUUSD: {
+    code: "XCUUSD",
+    metal: "XCU",
+    currency: "USD",
+    yahooSymbol: "HG=F",
+    label: "Copper",
+    displayName: "Copper Spot",
+    precision: 3,
+    minMove: 0.001,
+    basePrice: 5.12,
+  },
+  XURUSD: {
+    code: "XURUSD",
+    metal: "XUR",
+    currency: "USD",
+    yahooSymbol: "URNM",
+    label: "Uranium",
+    displayName: "Sprott Uranium Miners ETF",
+    precision: 2,
+    minMove: 0.01,
+    basePrice: 39.5,
+  },
 } as const;
 
 export type MetalSymbolCode = keyof typeof METAL_SYMBOLS;
@@ -131,7 +164,7 @@ export type MarketSnapshot = {
 };
 
 export function isMetalSymbolCode(value: string): value is MetalSymbolCode {
-  return value === "XAUUSD" || value === "XAGUSD";
+  return value in METAL_SYMBOLS;
 }
 
 export function isTimeframe(value: string): value is Timeframe {

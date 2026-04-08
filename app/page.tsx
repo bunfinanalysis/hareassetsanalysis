@@ -205,9 +205,10 @@ function DashboardContent() {
                       Elliott Wave Dashboard
                     </CardTitle>
                     <CardDescription className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-                      Real-time Gold and Silver charting with manual wave placement,
-                      auto-detect scaffolding, live Fibonacci overlays, and a
-                      dedicated analysis rail.
+                      Real-time Gold, Silver, Platinum, Copper, and Uranium
+                      charting with manual wave placement, auto-detect
+                      scaffolding, live Fibonacci overlays, and a dedicated
+                      analysis rail.
                     </CardDescription>
                   </div>
 

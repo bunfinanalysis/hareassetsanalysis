@@ -30,6 +30,46 @@ function sumVolume(candles: Candle[]) {
   return candles.reduce((total, candle) => total + (candle.volume ?? 0), 0);
 }
 
+function getMockMarketProfile(symbol: MetalSymbolCode) {
+  if (symbol === "XAUUSD") {
+    return {
+      volatilityUnit: 5.8,
+      trendBias: 0.22,
+      baseVolume: 7600,
+    };
+  }
+
+  if (symbol === "XPTUSD") {
+    return {
+      volatilityUnit: 4.2,
+      trendBias: 0.16,
+      baseVolume: 5200,
+    };
+  }
+
+  if (symbol === "XCUUSD") {
+    return {
+      volatilityUnit: 0.18,
+      trendBias: 0.03,
+      baseVolume: 11800,
+    };
+  }
+
+  if (symbol === "XURUSD") {
+    return {
+      volatilityUnit: 0.44,
+      trendBias: 0.04,
+      baseVolume: 9400,
+    };
+  }
+
+  return {
+    volatilityUnit: 0.78,
+    trendBias: 0.05,
+    baseVolume: 14200,
+  };
+}
+
 export function generateMockCandles({
   symbol,
   timeframe,
@@ -42,9 +82,7 @@ export function generateMockCandles({
   const config = TIMEFRAME_OPTIONS[timeframe];
   const meta = METAL_SYMBOLS[symbol];
   const random = createSeededRandom(buildSeed(symbol, timeframe));
-  const volatilityUnit = symbol === "XAUUSD" ? 5.8 : 0.78;
-  const trendBias = symbol === "XAUUSD" ? 0.22 : 0.05;
-  const baseVolume = symbol === "XAUUSD" ? 7600 : 14200;
+  const { volatilityUnit, trendBias, baseVolume } = getMockMarketProfile(symbol);
   const candleCount = config.candleCount;
   const alignedEndTime =
     Math.floor(Date.now() / 1000 / config.seconds) * config.seconds;
