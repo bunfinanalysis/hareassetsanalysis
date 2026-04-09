@@ -38,7 +38,7 @@ export function SymbolSwitcher({ selectedSymbol }: SymbolSwitcherProps) {
             <div className="flex flex-col items-start">
               <span className="text-sm font-semibold">{meta.label}</span>
               <span className="text-[11px] uppercase tracking-[0.28em] opacity-70">
-                {meta.metal}/USD
+                {meta.displayTicker}
               </span>
             </div>
           </Button>

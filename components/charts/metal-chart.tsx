@@ -290,12 +290,16 @@ const IMPULSE_COLOR = "#3b82f6";
 const CORRECTIVE_COLOR = "#f59e0b";
 const DRAW_LINE_COLOR = "#a855f7";
 const FREEHAND_DRAW_COLOR = "#ec4899";
-const RESISTANCE_ZONE_FILL = "rgba(249, 115, 22, 0.18)";
-const RESISTANCE_ZONE_STROKE = "rgba(251, 146, 60, 0.72)";
-const FIB_LINE_COLOR = "rgba(216, 168, 77, 0.6)";
+const RESISTANCE_ZONE_FILL = "rgba(249, 115, 22, 0.22)";
+const RESISTANCE_ZONE_STROKE = "#f59e0b";
+const RESISTANCE_ZONE_LABEL_FILL = "rgba(12, 18, 31, 0.92)";
+const RESISTANCE_ZONE_LABEL_STROKE = "rgba(245, 158, 11, 0.34)";
+const FIB_LINE_COLOR = "rgba(216, 168, 77, 0.34)";
 const LABEL_BACKGROUND_FILL = "rgba(6, 17, 31, 0.9)";
 const LABEL_BACKGROUND_STROKE = "rgba(255, 255, 255, 0.08)";
 const CHART_TIME_ZONE = "America/New_York";
+const WAVE_STROKE_WIDTH = 1.9;
+const FIB_STROKE_WIDTH = 1;
 const EMPTY_OVERLAY: OverlayGeometry = {
   width: 0,
   height: 0,
@@ -569,23 +573,23 @@ function getSmartLabelOffsetY(
   chartHeight: number,
   displayLabel: string,
 ) {
-  const baseOffset = displayLabel.length >= 5 ? 28 : 24;
+  const baseOffset = displayLabel.length >= 5 ? 34 : 29;
   let nextOffset = placement === "above" ? -baseOffset : baseOffset;
-  const labelHalfHeight = 11;
+  const labelHalfHeight = 12;
   const projectedTop = y + nextOffset - labelHalfHeight;
   const projectedBottom = y + nextOffset + labelHalfHeight;
 
-  if (projectedTop < 14) {
-    nextOffset = Math.abs(baseOffset) + 6;
-  } else if (projectedBottom > chartHeight - 14) {
-    nextOffset = -(Math.abs(baseOffset) + 6);
+  if (projectedTop < 20) {
+    nextOffset = Math.abs(baseOffset) + 8;
+  } else if (projectedBottom > chartHeight - 20) {
+    nextOffset = -(Math.abs(baseOffset) + 8);
   }
 
   return nextOffset;
 }
 
 function getLabelWidth(displayLabel: string) {
-  return Math.max(28, displayLabel.length * 7 + 12);
+  return Math.max(32, displayLabel.length * 7 + 16);
 }
 
 function buildWaveAnalysis(
@@ -753,7 +757,7 @@ function buildOverlayPoints(
         color,
         labelOffsetY,
         labelWidth: getLabelWidth(displayLabel),
-        labelHeight: 18,
+        labelHeight: 20,
       };
     })
     .filter((point): point is OverlayWavePoint => point !== null);
@@ -4185,9 +4189,9 @@ export function MetalChart({
 
   return (
     <div className="relative flex h-full min-h-[540px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0">
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-24 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,16,28,0.92),rgba(8,13,24,0.68),rgba(8,13,24,0))]" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-28 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,16,28,0.92),rgba(8,13,24,0.68),rgba(8,13,24,0))]" />
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 py-2.5">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 py-3.5">
         <div>
           <p className="text-[11px] uppercase tracking-[0.34em] text-muted-foreground">
             Live Chart
@@ -4198,7 +4202,7 @@ export function MetalChart({
         </div>
       </div>
 
-      <div className="absolute right-4 top-3 z-30 flex flex-wrap items-center gap-2">
+      <div className="absolute right-4 top-4 z-30 flex flex-wrap items-center gap-2">
         <div className="flex items-center rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl">
           <Button
             size="sm"
@@ -4348,7 +4352,7 @@ export function MetalChart({
         </Button>
       </div>
 
-      <div className="absolute inset-x-0 bottom-14 top-24 overflow-hidden">
+      <div className="absolute inset-x-0 bottom-16 top-28 overflow-hidden">
         <div ref={containerRef} className="absolute inset-0 h-full w-full min-h-0" />
         {isResistanceMode ? (
           <div
@@ -4379,7 +4383,14 @@ export function MetalChart({
           >
           {overlayGeometry.resistanceZones.map((zone) => {
             const isActive = activeResistanceZoneId === zone.id;
-            const zoneLabelY = zone.centerY + 4;
+            const zoneLabelBoxWidth = 154;
+            const zoneLabelBoxHeight = 36;
+            const zoneLabelBoxX = Math.max(16, overlayGeometry.width - zoneLabelBoxWidth - 18);
+            const zoneLabelBoxY = clamp(
+              zone.centerY - zoneLabelBoxHeight / 2,
+              zone.topY + 6,
+              Math.max(zone.bottomY - zoneLabelBoxHeight - 6, zone.topY + 6),
+            );
 
             return (
               <g key={zone.id}>
@@ -4390,8 +4401,8 @@ export function MetalChart({
                   height={Math.max(zone.bottomY - zone.topY, 12)}
                   rx={8}
                   fill={RESISTANCE_ZONE_FILL}
-                  stroke={isActive ? "rgba(253, 186, 116, 0.95)" : "rgba(251, 146, 60, 0.26)"}
-                  strokeWidth={isActive ? 1.2 : 1}
+                  stroke={isActive ? "rgba(253, 186, 116, 0.75)" : "rgba(245, 158, 11, 0.38)"}
+                  strokeWidth={isActive ? 1.4 : 1.1}
                   className="pointer-events-auto cursor-grab"
                   onPointerDown={startResistanceZoneInteraction(zone.id, "move")}
                 />
@@ -4401,7 +4412,7 @@ export function MetalChart({
                   x2={overlayGeometry.width - 10}
                   y2={zone.topY}
                   stroke={RESISTANCE_ZONE_STROKE}
-                  strokeWidth={1.2}
+                  strokeWidth={2}
                 />
                 <line
                   x1={10}
@@ -4409,7 +4420,7 @@ export function MetalChart({
                   x2={overlayGeometry.width - 10}
                   y2={zone.bottomY}
                   stroke={RESISTANCE_ZONE_STROKE}
-                  strokeWidth={1.2}
+                  strokeWidth={2}
                 />
                 <line
                   x1={10}
@@ -4431,25 +4442,37 @@ export function MetalChart({
                   className="pointer-events-auto cursor-ns-resize"
                   onPointerDown={startResistanceZoneInteraction(zone.id, "resize-bottom")}
                 />
-                <rect
-                  x={Math.max(16, overlayGeometry.width / 2 - 38)}
-                  y={Math.max(zone.topY + 6, zone.centerY - 10)}
-                  width={76}
-                  height={20}
-                  rx={10}
-                  fill="rgba(12, 18, 31, 0.88)"
-                  stroke="rgba(251, 146, 60, 0.24)"
-                />
-                <text
-                  x={overlayGeometry.width / 2}
-                  y={zoneLabelY}
-                  fill="#fdba74"
-                  fontSize="9.4"
-                  fontWeight="700"
-                  textAnchor="middle"
-                >
-                  {zone.percentLabel}
-                </text>
+                <g pointerEvents="none">
+                  <rect
+                    x={zoneLabelBoxX}
+                    y={zoneLabelBoxY}
+                    width={zoneLabelBoxWidth}
+                    height={zoneLabelBoxHeight}
+                    rx={10}
+                    fill={RESISTANCE_ZONE_LABEL_FILL}
+                    stroke={RESISTANCE_ZONE_LABEL_STROKE}
+                  />
+                  <text
+                    x={zoneLabelBoxX + zoneLabelBoxWidth / 2}
+                    y={zoneLabelBoxY + 13}
+                    fill="#fde68a"
+                    fontSize="8.2"
+                    fontWeight="700"
+                    textAnchor="middle"
+                  >
+                    Resistance Zone
+                  </text>
+                  <text
+                    x={zoneLabelBoxX + zoneLabelBoxWidth / 2}
+                    y={zoneLabelBoxY + 26}
+                    fill="#f59e0b"
+                    fontSize="10.5"
+                    fontWeight="800"
+                    textAnchor="middle"
+                  >
+                    {zone.percentLabel}
+                  </text>
+                </g>
               </g>
             );
           })}
@@ -4466,21 +4489,64 @@ export function MetalChart({
                   10,
                 )}
                 rx={8}
-                fill="rgba(249, 115, 22, 0.14)"
-                stroke="rgba(251, 146, 60, 0.4)"
-                strokeWidth={1}
+                fill="rgba(249, 115, 22, 0.16)"
+                stroke="rgba(245, 158, 11, 0.42)"
+                strokeWidth={1.1}
                 strokeDasharray="4 4"
               />
-              <text
-                x={overlayGeometry.width / 2}
-                y={overlayGeometry.draftResistanceZone.centerY + 4}
-                fill="#fdba74"
-                fontSize="9.1"
-                fontWeight="700"
-                textAnchor="middle"
-              >
-                {overlayGeometry.draftResistanceZone.percentLabel}
-              </text>
+              <g pointerEvents="none">
+                <rect
+                  x={Math.max(16, overlayGeometry.width - 164)}
+                  y={clamp(
+                    overlayGeometry.draftResistanceZone.centerY - 16,
+                    overlayGeometry.draftResistanceZone.topY + 6,
+                    Math.max(
+                      overlayGeometry.draftResistanceZone.bottomY - 32 - 6,
+                      overlayGeometry.draftResistanceZone.topY + 6,
+                    ),
+                  )}
+                  width={148}
+                  height={32}
+                  rx={10}
+                  fill="rgba(12, 18, 31, 0.82)"
+                  stroke="rgba(245, 158, 11, 0.28)"
+                  strokeDasharray="4 4"
+                />
+                <text
+                  x={Math.max(16, overlayGeometry.width - 164) + 74}
+                  y={clamp(
+                    overlayGeometry.draftResistanceZone.centerY - 4,
+                    overlayGeometry.draftResistanceZone.topY + 18,
+                    Math.max(
+                      overlayGeometry.draftResistanceZone.bottomY - 18,
+                      overlayGeometry.draftResistanceZone.topY + 18,
+                    ),
+                  )}
+                  fill="#fde68a"
+                  fontSize="8"
+                  fontWeight="700"
+                  textAnchor="middle"
+                >
+                  Resistance Zone
+                </text>
+                <text
+                  x={Math.max(16, overlayGeometry.width - 164) + 74}
+                  y={clamp(
+                    overlayGeometry.draftResistanceZone.centerY + 9,
+                    overlayGeometry.draftResistanceZone.topY + 30,
+                    Math.max(
+                      overlayGeometry.draftResistanceZone.bottomY - 6,
+                      overlayGeometry.draftResistanceZone.topY + 30,
+                    ),
+                  )}
+                  fill="#f59e0b"
+                  fontSize="10.2"
+                  fontWeight="800"
+                  textAnchor="middle"
+                >
+                  {overlayGeometry.draftResistanceZone.percentLabel}
+                </text>
+              </g>
             </g>
           ) : null}
 
@@ -4955,8 +5021,8 @@ export function MetalChart({
                 x2={overlayGeometry.width - 14}
                 y2={level.y}
                 stroke={FIB_LINE_COLOR}
-                strokeDasharray={level.isActive ? "4 6" : "3 7"}
-                strokeWidth={level.isActive ? 1.1 : 1}
+                strokeDasharray={level.isActive ? "3 7" : "2 8"}
+                strokeWidth={FIB_STROKE_WIDTH}
               />
               <rect
                 x={Math.max(12, overlayGeometry.width - 118)}
@@ -4964,8 +5030,8 @@ export function MetalChart({
                 width={106}
                 height={14}
                 rx={7}
-                fill={level.isActive ? "rgba(216,168,77,0.08)" : "rgba(14, 20, 33, 0.7)"}
-                stroke={level.isActive ? "rgba(216,168,77,0.22)" : "rgba(255,255,255,0.03)"}
+                fill={level.isActive ? "rgba(216,168,77,0.06)" : "rgba(14, 20, 33, 0.62)"}
+                stroke={level.isActive ? "rgba(216,168,77,0.16)" : "rgba(255,255,255,0.025)"}
               />
               <text
                 x={overlayGeometry.width - 65}
@@ -4988,9 +5054,10 @@ export function MetalChart({
               x2={segment.x2}
               y2={segment.y2}
               stroke={segment.color}
-              strokeWidth={1.8}
+              strokeWidth={WAVE_STROKE_WIDTH}
               strokeLinecap="round"
               strokeLinejoin="round"
+              opacity={0.94}
             />
           ))}
 
@@ -5002,9 +5069,10 @@ export function MetalChart({
               x2={segment.x2}
               y2={segment.y2}
               stroke={segment.color}
-              strokeWidth={1.8}
+              strokeWidth={WAVE_STROKE_WIDTH}
               strokeLinecap="round"
               strokeLinejoin="round"
+              opacity={0.94}
             />
           ))}
 
@@ -5025,7 +5093,7 @@ export function MetalChart({
               />
               <rect
                 x={point.x - point.labelWidth / 2}
-                y={point.y + point.labelOffsetY - point.labelHeight / 2 - 1}
+                y={point.y + point.labelOffsetY - point.labelHeight / 2 - 2}
                 width={point.labelWidth}
                 height={point.labelHeight}
                 rx={9}

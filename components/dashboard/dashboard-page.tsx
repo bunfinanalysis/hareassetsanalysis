@@ -133,7 +133,7 @@ export function DashboardPage() {
               <CardContent>
                 <InfoMetric
                   label="Selected Market"
-                  value={`${symbolMeta.label} (${selectedSymbol})`}
+                  value={`${symbolMeta.label} (${symbolMeta.displayTicker})`}
                 />
                 <InfoMetric
                   label="Session Position"
