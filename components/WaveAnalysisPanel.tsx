@@ -29,6 +29,19 @@ import {
 } from "@/lib/elliottReactionEngine";
 import type { ABCImprovedScenario } from "@/lib/elliottABCEngine";
 import {
+  buildNoTradeBadge,
+  buildNoTradeEvidenceSummary,
+  buildNoTradeSummary,
+  buildScenarioEvidenceBadge,
+  buildScenarioEvidenceSummary,
+  buildTargetLadderRows,
+  formatHigherTimeframeAlignmentLabel,
+  formatRiskClassificationLabel,
+  formatSetupQualityLabel,
+  formatValidationStatusLabel,
+} from "@/lib/elliott-engine/evidence-presentation";
+import type { NoTradeState } from "@/lib/elliott-engine/types";
+import {
   CORRECTIVE_LABELS,
   sortWavePoints,
   type FibonacciLevel,
@@ -51,6 +64,7 @@ type WaveAnalysisPanelData = {
   impulseValidation?: WaveValidationResult | null;
   correctiveValidation?: WaveValidationResult | null;
   abcScenarios?: ABCImprovedScenario[];
+  abcNoTradeState?: NoTradeState | null;
 };
 
 export type WaveAnalysisPanelProps = {
@@ -117,6 +131,22 @@ function formatReactionWaveLabel(
   }
 
   return "Wave Pending";
+}
+
+function formatAlternateCountAvailability(exists: boolean) {
+  return exists ? "Available" : "Not available";
+}
+
+function formatScenarioComponentStrength(value: number) {
+  if (value >= 75) {
+    return "Strong";
+  }
+
+  if (value >= 50) {
+    return "Moderate";
+  }
+
+  return "Weak";
 }
 
 function buildHeadline(count: WaveCount | null) {
@@ -312,12 +342,12 @@ function pickNearestLevel(levels: FibonacciLevel[], currentPrice?: number) {
   });
 }
 
-function getValidationTone(status: WaveRuleStatus) {
+function getValidationTone(status: WaveRuleStatus | "pending") {
   if (status === "pass") {
     return "text-emerald-300";
   }
 
-  if (status === "warning") {
+  if (status === "warning" || status === "pending") {
     return "text-amber-200";
   }
 
@@ -392,7 +422,10 @@ export function WaveAnalysisPanel({
   const primaryZone = reactionAnalysis?.primaryZone ?? null;
   const alternateZone = reactionAnalysis?.alternateZones[0] ?? null;
   const abcScenarios = waveAnalysis?.abcScenarios ?? [];
+  const abcNoTradeState = waveAnalysis?.abcNoTradeState ?? null;
   const primaryABCScenario = abcScenarios[0] ?? null;
+  const alternateABCScenario =
+    abcScenarios.find((scenario) => scenario.scenarioRole === "alternate") ?? null;
   const sortedWavePoints = useMemo(() => sortWavePoints(wavePoints), [wavePoints]);
   const projectionTargets = useMemo(
     () => buildProjectionTargets(activeCount),
@@ -414,7 +447,6 @@ export function WaveAnalysisPanel({
   const hardRules = reactionAnalysis?.validation.hardRules ?? [];
   const guidelines = reactionAnalysis?.validation.guidelines ?? [];
   const ruleCount = hardRules.length + guidelines.length;
-  const confidencePercent = primaryZone ? Math.round(primaryZone.confidence * 100) : null;
   const currentWaveLabel = formatReactionWaveLabel(reactionAnalysis?.currentWave);
   const reactionLabel = reactionAnalysis
     ? `${currentWaveLabel} ${capitalize(reactionAnalysis.reactionType)} Cluster`
@@ -455,15 +487,19 @@ export function WaveAnalysisPanel({
             <div
               className={cn(
                 "rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.08em]",
-                primaryABCScenario
+                abcNoTradeState
+                  ? "border-rose-300/25 bg-rose-300/10 text-rose-100"
+                  : primaryABCScenario
                   ? "border-amber-300/25 bg-amber-300/10 text-amber-100"
                   : getConfidenceTone(primaryZone?.confidenceLabel ?? null),
               )}
             >
-              {primaryABCScenario
-                ? `ABC confidence · ${primaryABCScenario.confidence}%`
+              {abcNoTradeState
+                ? buildNoTradeBadge(abcNoTradeState)
+                : primaryABCScenario
+                ? buildScenarioEvidenceBadge(primaryABCScenario)
                 : primaryZone
-                ? `${primaryZone.confidenceLabel} confidence${confidencePercent !== null ? ` · ${confidencePercent}%` : ""}`
+                ? `${primaryZone.confidenceLabel} setup quality`
                 : "Awaiting scored zone"}
             </div>
             <Button
@@ -504,10 +540,18 @@ export function WaveAnalysisPanel({
                 Current Count
               </p>
               <h3 className="mt-2 text-base font-semibold text-foreground">
-                {primaryABCScenario ? primaryABCScenario.name : buildHeadline(activeCount)}
+                {abcNoTradeState
+                  ? abcNoTradeState.title
+                  : primaryABCScenario
+                    ? primaryABCScenario.name
+                    : buildHeadline(activeCount)}
               </h3>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                {primaryABCScenario ? primaryABCScenario.label : buildSubheadline(activeCount)}
+                {abcNoTradeState
+                  ? buildNoTradeSummary(abcNoTradeState)
+                  : primaryABCScenario
+                    ? primaryABCScenario.label
+                    : buildSubheadline(activeCount)}
               </p>
             </div>
 
@@ -516,7 +560,9 @@ export function WaveAnalysisPanel({
                 Live Context
               </p>
               <p className="mt-1 break-words text-base font-semibold leading-tight text-foreground">
-                {primaryABCScenario
+                {abcNoTradeState
+                  ? "No clear edge"
+                  : primaryABCScenario
                   ? "Wave C"
                   : reactionAnalysis
                     ? currentWaveLabel
@@ -525,13 +571,106 @@ export function WaveAnalysisPanel({
                       : "Not set"}
               </p>
               <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
-                {primaryABCScenario
+                {abcNoTradeState
+                  ? abcNoTradeState.confirmationNeeded[0]?.detail ?? "Awaiting confirmation"
+                  : primaryABCScenario
                   ? `Invalidation $${formatPrice(primaryABCScenario.invalidationLevel, pricePrecision)}`
                   : reactionAnalysis
                     ? capitalize(reactionAnalysis.reactionType)
                     : "Waiting"}
               </p>
             </div>
+
+            {primaryABCScenario ? (
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+                    Primary Count
+                  </p>
+                  <p className="mt-2 text-sm font-semibold text-foreground">
+                    {primaryABCScenario.structureLabel}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {primaryABCScenario.label}
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground/85">
+                    Invalidation: ${formatPrice(primaryABCScenario.invalidationLevel, pricePrecision)}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-white/8 bg-black/20 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+                    Alternate Count
+                  </p>
+                  {alternateABCScenario ? (
+                    <>
+                      <p className="mt-2 text-sm font-semibold text-foreground">
+                        {alternateABCScenario.structureLabel}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {alternateABCScenario.relativeStrength === "close"
+                          ? "Close challenger"
+                          : alternateABCScenario.relativeStrength === "weaker"
+                            ? "Weaker alternate"
+                            : "Reserve scenario"}
+                      </p>
+                      <p className="mt-2 text-xs leading-5 text-muted-foreground/85">
+                        {alternateABCScenario.promotionCondition?.reason ??
+                          "Promotes if the current primary count loses structural validity."}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      Only one valid corrective scenario is currently supported by the active swing structure.
+                    </p>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {abcNoTradeState ? (
+              <div className="rounded-2xl border border-rose-300/18 bg-rose-300/8 p-3">
+                <p className="text-[11px] uppercase tracking-[0.24em] text-rose-100/80">
+                  No-Trade State
+                </p>
+                <p className="mt-2 text-sm font-semibold text-foreground">
+                  {abcNoTradeState.title}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {buildNoTradeEvidenceSummary(abcNoTradeState)}
+                </p>
+                <div className="mt-3 space-y-2">
+                  {abcNoTradeState.reasonDetails.slice(0, 3).map((reason) => (
+                    <div
+                      key={`no-trade-${reason.code}`}
+                      className="rounded-xl border border-white/8 bg-black/15 px-3 py-2"
+                    >
+                      <p className="text-sm font-medium text-foreground">{reason.label}</p>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {reason.detail}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                {abcNoTradeState.confirmationNeeded.length > 0 ? (
+                  <div className="mt-3 rounded-xl border border-white/8 bg-black/15 p-3">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                      Confirmation Needed
+                    </p>
+                    <div className="mt-2 space-y-2">
+                      {abcNoTradeState.confirmationNeeded.slice(0, 3).map((item) => (
+                        <div key={`${item.label}-${item.level ?? "na"}`}>
+                          <p className="text-sm font-medium text-foreground">{item.label}</p>
+                          <p className="text-xs leading-5 text-muted-foreground">
+                            {item.detail}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {abcScenarios.length > 0 ? (
@@ -543,29 +682,64 @@ export function WaveAnalysisPanel({
                 {abcScenarios.slice(0, 3).map((scenario) => (
                   <div
                     key={`summary-${scenario.id}`}
-                    className="flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/15 px-3 py-2"
+                    className="rounded-xl border border-white/8 bg-black/15 px-3 py-3"
                   >
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium leading-5 text-foreground">
-                        {scenario.primary ? "Primary" : `Alt ${scenario.id}`} · {scenario.name}
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        Invalidation ${formatPrice(scenario.invalidationLevel, pricePrecision)}
-                      </p>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium leading-5 text-foreground">
+                          {scenario.scenarioRole === "primary" || scenario.scenarioRole === "sole"
+                            ? "Primary"
+                            : scenario.scenarioRole === "alternate"
+                              ? "Alternate"
+                              : "Reserve"}{" "}
+                          · {scenario.name}
+                        </p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {scenario.structureLabel} · {formatValidationStatusLabel(scenario.evidence.validationStatus)}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-xs font-semibold text-amber-100">
+                        {formatSetupQualityLabel(scenario.evidence.setupQuality)}
+                      </span>
                     </div>
-                    <span className="shrink-0 text-xs font-semibold text-amber-100">
-                      {scenario.confidence}%
-                    </span>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
+                        Invalidation: ${formatPrice(scenario.invalidationLevel, pricePrecision)}
+                      </span>
+                      <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
+                        {formatRiskClassificationLabel(scenario.evidence.riskClassification)}
+                      </span>
+                      {scenario.relativeStrength ? (
+                        <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
+                          {scenario.relativeStrength === "close"
+                            ? "Close challenger"
+                            : scenario.relativeStrength === "weaker"
+                              ? "Weaker alternate"
+                              : "Clearly weaker"}
+                        </span>
+                      ) : null}
+                    </div>
+                    {scenario.promotionCondition ? (
+                      <p className="mt-2 text-xs leading-5 text-muted-foreground/85">
+                        Promotion: {scenario.promotionCondition.reason}
+                      </p>
+                    ) : abcScenarios.length === 1 ? (
+                      <p className="mt-2 text-xs leading-5 text-muted-foreground/85">
+                        Only one valid corrective scenario is currently supported by the active pivot sequence.
+                      </p>
+                    ) : null}
                   </div>
                 ))}
               </div>
               {primaryABCScenario?.targets.length ? (
                 <div className="mt-3 rounded-xl border border-white/8 bg-black/15 p-3">
                   <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
-                    Wave C Target Odds
+                    Wave C Target Ladder
                   </p>
                   <div className="mt-2 space-y-1.5">
-                    {primaryABCScenario.targets.slice(0, 4).map((target) => (
+                    {buildTargetLadderRows(primaryABCScenario)
+                      .slice(0, 4)
+                      .map((target) => (
                       <div
                         key={`summary-target-${target.fibRatio}-${target.price}`}
                         className="flex items-center justify-between gap-3 text-xs"
@@ -575,7 +749,7 @@ export function WaveAnalysisPanel({
                           ${formatPrice(target.price, pricePrecision)}
                         </span>
                         <span className="font-semibold text-amber-100">
-                          {target.probability}%
+                          {target.emphasis}
                         </span>
                       </div>
                     ))}
@@ -621,7 +795,9 @@ export function WaveAnalysisPanel({
             <div className="grid grid-cols-1 gap-3">
               <div className="min-w-0 rounded-2xl border border-white/8 bg-white/4 p-4">
                 <div className="flex items-center gap-2">
-                  {activeCount?.direction === "bearish" ? (
+                  {abcNoTradeState ? (
+                    <Radar className="h-4 w-4 text-amber-200" />
+                  ) : activeCount?.direction === "bearish" ? (
                     <TrendingDown className="h-4 w-4 text-rose-300" />
                   ) : (
                     <TrendingUp className="h-4 w-4 text-emerald-300" />
@@ -629,12 +805,18 @@ export function WaveAnalysisPanel({
                   <p className="text-sm font-medium text-foreground">Trend Bias</p>
                 </div>
                 <p className="mt-3 break-words text-lg font-semibold leading-tight text-foreground">
-                  {activeCount ? capitalize(activeCount.direction) : "Neutral"}
+                  {abcNoTradeState
+                    ? "No clear edge"
+                    : activeCount
+                      ? capitalize(activeCount.direction)
+                      : "Neutral"}
                 </p>
                 <p className="mt-1 break-words text-sm leading-6 text-muted-foreground">
-                  {activeCount
-                    ? `${capitalize(activeCount.pattern)} structure with ${DEGREE_LABELS[activeCount.degree].toLowerCase()}-degree pivots`
-                    : "Waiting for enough wave points to define structure."}
+                  {abcNoTradeState
+                    ? buildNoTradeSummary(abcNoTradeState)
+                    : activeCount
+                      ? `${capitalize(activeCount.pattern)} structure with ${DEGREE_LABELS[activeCount.degree].toLowerCase()}-degree pivots`
+                      : "Waiting for enough wave points to define structure."}
                 </p>
               </div>
 
@@ -644,12 +826,19 @@ export function WaveAnalysisPanel({
                   <p className="text-sm font-medium text-foreground">Reaction Context</p>
                 </div>
                 <p className="mt-3 break-words text-lg font-semibold leading-tight text-foreground">
-                  {reactionAnalysis ? capitalize(reactionAnalysis.reactionType) : "Pending"}
+                  {abcNoTradeState
+                    ? "Awaiting confirmation"
+                    : reactionAnalysis
+                      ? capitalize(reactionAnalysis.reactionType)
+                      : "Pending"}
                 </p>
                 <p className="mt-1 break-words text-sm leading-6 text-muted-foreground">
-                  {reactionAnalysis
-                    ? `${currentWaveLabel} is being scored as a ${reactionAnalysis.reactionType} zone.`
-                    : "Add more pivots to identify the next actionable reaction cluster."}
+                  {abcNoTradeState
+                    ? abcNoTradeState.confirmationNeeded[0]?.detail ??
+                      "Wait for a cleaner break or stronger structural confirmation."
+                    : reactionAnalysis
+                      ? `${currentWaveLabel} is being scored as a ${reactionAnalysis.reactionType} zone.`
+                      : "Add more pivots to identify the next actionable reaction cluster."}
                 </p>
               </div>
 
@@ -687,7 +876,7 @@ export function WaveAnalysisPanel({
                 </div>
                 {primaryZone ? (
                   <Badge className={cn("border px-3 py-1 text-xs font-semibold", getConfidenceTone(primaryZone.confidenceLabel))}>
-                    {primaryZone.confidenceLabel}
+                    {`${primaryZone.confidenceLabel} setup`}
                   </Badge>
                 ) : null}
               </div>
@@ -703,7 +892,7 @@ export function WaveAnalysisPanel({
                         ${formatPrice(primaryZone.low, pricePrecision)} - ${formatPrice(primaryZone.high, pricePrecision)}
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {confidencePercent}% deterministic confidence
+                        {`${primaryZone.confidenceLabel} setup quality`}
                       </p>
                     </div>
                     <div className="rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
@@ -739,7 +928,7 @@ export function WaveAnalysisPanel({
 
                   <details className="mt-4 rounded-2xl border border-white/8 bg-[rgba(255,255,255,0.03)] p-3">
                     <summary className="cursor-pointer list-none text-sm font-medium text-foreground">
-                      Score Explanation
+                      Confluence Breakdown
                     </summary>
                     <div className="mt-3 space-y-2">
                       {primaryZone.scoreBreakdown.map((entry) => (
@@ -749,7 +938,11 @@ export function WaveAnalysisPanel({
                         >
                           <span className="text-sm text-muted-foreground">{entry.label}</span>
                           <span className="text-sm font-semibold text-foreground">
-                            {Math.round(entry.value * 100)}%
+                            {entry.value >= 0.75
+                              ? "Strong"
+                              : entry.value >= 0.5
+                                ? "Moderate"
+                                : "Weak"}
                           </span>
                         </div>
                       ))}
@@ -774,7 +967,7 @@ export function WaveAnalysisPanel({
                       ${formatPrice(alternateZone.low, pricePrecision)} - ${formatPrice(alternateZone.high, pricePrecision)}
                     </p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {alternateZone.confidenceLabel} confidence · {Math.round(alternateZone.confidence * 100)}%
+                      {alternateZone.confidenceLabel} setup quality
                     </p>
                     <p className="mt-2 text-sm text-muted-foreground">
                       {alternateZone.reasonSummary}
@@ -993,7 +1186,7 @@ export function WaveAnalysisPanel({
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 {primaryZone
-                  ? `${reactionLabel} is currently the preferred scenario. Confidence is derived from fib confluence, prior structure, channel alignment, round-number proximity, and rule quality.`
+                  ? `${reactionLabel} is currently the preferred scenario. Setup quality is derived from fib confluence, prior structure, channel alignment, round-number proximity, and rule quality.`
                   : "Add more pivots to unlock the next-wave reaction zone."}
               </p>
             </div>
@@ -1011,7 +1204,7 @@ export function WaveAnalysisPanel({
                     </p>
                   </div>
                   <Badge className={cn("border px-3 py-1 text-xs font-semibold", getConfidenceTone(primaryZone.confidenceLabel))}>
-                    {primaryZone.confidenceLabel}
+                    {`${primaryZone.confidenceLabel} setup`}
                   </Badge>
                 </div>
               </div>
@@ -1024,7 +1217,7 @@ export function WaveAnalysisPanel({
                   {alternateZone.label} · ${formatPrice(alternateZone.low, pricePrecision)} - ${formatPrice(alternateZone.high, pricePrecision)}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {alternateZone.confidenceLabel} confidence · {alternateZone.reasonSummary}
+                  {alternateZone.confidenceLabel} setup · {alternateZone.reasonSummary}
                 </p>
               </div>
             ) : null}
@@ -1046,19 +1239,122 @@ export function WaveAnalysisPanel({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold text-foreground">
-                      Wave C Probability Table
+                      Scenario Evidence
                     </p>
                     <p className="mt-2 text-sm leading-6 text-muted-foreground">
                       {primaryABCScenario.label}
                     </p>
                   </div>
                   <Badge className="border border-amber-300/20 bg-amber-300/10 text-amber-100 hover:bg-amber-300/10">
-                    {primaryABCScenario.confidence}%
+                    {formatSetupQualityLabel(primaryABCScenario.evidence.setupQuality)}
                   </Badge>
                 </div>
 
+                <div className="mt-4 grid grid-cols-1 gap-2">
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Validation</span>
+                      <span className="font-semibold text-foreground">
+                        {formatValidationStatusLabel(primaryABCScenario.evidence.validationStatus)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Higher timeframe</span>
+                      <span className="font-semibold text-foreground">
+                        {formatHigherTimeframeAlignmentLabel(primaryABCScenario.evidence.higherTimeframeAlignment)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Risk type</span>
+                      <span className="font-semibold text-foreground">
+                        {formatRiskClassificationLabel(primaryABCScenario.evidence.riskClassification)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Evidence summary</span>
+                      <span className="font-semibold text-foreground">
+                        {buildScenarioEvidenceSummary(primaryABCScenario)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Alternate count</span>
+                      <span className="font-semibold text-foreground">
+                        {formatAlternateCountAvailability(
+                          primaryABCScenario.evidence.alternateCountExists,
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-white/8 bg-black/15 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Evidence Checks
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {primaryABCScenario.evidence.evidenceChecks
+                      .slice(0, 5)
+                      .map((check) => (
+                        <div
+                          key={`${check.label}-${check.status}`}
+                          className="rounded-xl border border-white/8 bg-white/4 px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-sm font-medium text-foreground">
+                              {check.label}
+                            </span>
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "border-white/10 text-[10px] uppercase tracking-[0.16em]",
+                                getValidationTone(check.status),
+                              )}
+                            >
+                              {check.status}
+                            </Badge>
+                          </div>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {check.detail}
+                          </p>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-white/8 bg-black/15 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Scenario Components
+                  </p>
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {primaryABCScenario.scoreComponents.map((component) => (
+                      <div
+                        key={`component-${component.key}`}
+                        className="rounded-xl border border-white/8 bg-white/4 px-3 py-2"
+                      >
+                        <p className="text-xs text-muted-foreground">{component.label}</p>
+                        <p className="mt-1 text-sm font-semibold text-foreground">
+                          {formatScenarioComponentStrength(component.value)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  {primaryABCScenario.promotionCondition ? (
+                    <p className="mt-3 text-xs leading-5 text-muted-foreground/85">
+                      Promotion: {primaryABCScenario.promotionCondition.reason}
+                    </p>
+                  ) : null}
+                </div>
+
                 <div className="mt-4 space-y-2">
-                  {primaryABCScenario.targets.map((target) => (
+                  {buildTargetLadderRows(primaryABCScenario).map((target) => (
                     <div
                       key={`${target.fibRatio}-${target.price}`}
                       className="flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/15 px-3 py-2"
@@ -1068,16 +1364,14 @@ export function WaveAnalysisPanel({
                           {target.fibRatio}
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          Wave C objective
+                          {target.emphasis}
                         </p>
                       </div>
                       <div className="text-right">
                         <p className="text-sm font-semibold text-foreground">
                           ${formatPrice(target.price, pricePrecision)}
                         </p>
-                        <p className="text-xs text-amber-100">
-                          {target.probability}% probability
-                        </p>
+                        <p className="text-xs text-amber-100">{target.emphasis}</p>
                       </div>
                     </div>
                   ))}
@@ -1087,8 +1381,87 @@ export function WaveAnalysisPanel({
                   Invalidation: ${formatPrice(primaryABCScenario.invalidationLevel, pricePrecision)}
                 </p>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  Momentum/volume filter: {Math.round(primaryABCScenario.momentumScore)} / {Math.round(primaryABCScenario.volumeScore)}
+                  {formatHigherTimeframeAlignmentLabel(primaryABCScenario.evidence.higherTimeframeAlignment)} · {formatRiskClassificationLabel(primaryABCScenario.evidence.riskClassification)}
                 </p>
+              </div>
+            ) : null}
+
+            {abcNoTradeState ? (
+              <div className="rounded-2xl border border-rose-300/18 bg-rose-300/8 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">
+                      No Validated Directional Edge
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                      {buildNoTradeSummary(abcNoTradeState)}
+                    </p>
+                  </div>
+                  <Badge className="border border-rose-300/20 bg-rose-300/10 text-rose-100 hover:bg-rose-300/10">
+                    {abcNoTradeState.expectedToResolveWithMoreData
+                      ? "Awaiting confirmation"
+                      : "Stand aside"}
+                  </Badge>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 gap-2">
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Evidence summary</span>
+                      <span className="font-semibold text-foreground">
+                        {buildNoTradeEvidenceSummary(abcNoTradeState)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/8 bg-black/15 px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-muted-foreground">Expected to resolve</span>
+                      <span className="font-semibold text-foreground">
+                        {abcNoTradeState.expectedToResolveWithMoreData ? "Yes" : "Not yet"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-white/8 bg-black/15 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Why The Engine Is Standing Aside
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {abcNoTradeState.reasonDetails.map((reason) => (
+                      <div
+                        key={`analysis-no-trade-${reason.code}`}
+                        className="rounded-xl border border-white/8 bg-white/4 px-3 py-2"
+                      >
+                        <p className="text-sm font-medium text-foreground">{reason.label}</p>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {reason.detail}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {abcNoTradeState.confirmationNeeded.length > 0 ? (
+                  <div className="mt-4 rounded-xl border border-white/8 bg-black/15 p-3">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                      What Would Improve The Read
+                    </p>
+                    <div className="mt-3 space-y-2">
+                      {abcNoTradeState.confirmationNeeded.map((item) => (
+                        <div
+                          key={`confirmation-${item.label}-${item.level ?? "na"}`}
+                          className="rounded-xl border border-white/8 bg-white/4 px-3 py-2"
+                        >
+                          <p className="text-sm font-medium text-foreground">{item.label}</p>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {item.detail}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -1108,7 +1481,7 @@ export function WaveAnalysisPanel({
                           {scenario.primary ? "Primary" : `Alt ${scenario.id}`} · {scenario.name}
                         </p>
                         <span className="text-xs font-semibold text-amber-100">
-                          {scenario.confidence}%
+                          {formatSetupQualityLabel(scenario.evidence.setupQuality)}
                         </span>
                       </div>
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -1117,16 +1490,34 @@ export function WaveAnalysisPanel({
                       <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
                         {scenario.label}
                       </p>
+                      {scenario.promotionCondition ? (
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+                          Promotion: {scenario.promotionCondition.reason}
+                        </p>
+                      ) : null}
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
                           Invalidation: ${formatPrice(scenario.invalidationLevel, pricePrecision)}
                         </span>
                         <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
-                          Momentum {Math.round(scenario.momentumScore)}
+                          {formatValidationStatusLabel(scenario.evidence.validationStatus)}
                         </span>
                         <span className="rounded-full border border-white/8 bg-white/5 px-2 py-1">
-                          Volume {Math.round(scenario.volumeScore)}
+                          {formatRiskClassificationLabel(scenario.evidence.riskClassification)}
                         </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                        {scenario.scoreComponents.slice(0, 4).map((component) => (
+                          <div
+                            key={`${scenario.id}-${component.key}`}
+                            className="rounded-lg border border-white/8 bg-white/4 px-2 py-1.5 text-xs"
+                          >
+                            <p className="text-muted-foreground">{component.label}</p>
+                            <p className="mt-1 font-semibold text-foreground">
+                              {formatScenarioComponentStrength(component.value)}
+                            </p>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}

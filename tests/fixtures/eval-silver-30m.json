@@ -1,0 +1,18 @@
+{
+  "instrument": "XAGUSD",
+  "timeframe": "30m",
+  "candles": [
+    { "time": 1, "open": 99.8, "high": 100.4, "low": 99.6, "close": 100.0, "volume": 1200 },
+    { "time": 2, "open": 100.8, "high": 101.4, "low": 100.6, "close": 101.0, "volume": 1180 },
+    { "time": 3, "open": 102.8, "high": 103.4, "low": 102.6, "close": 103.0, "volume": 1250 },
+    { "time": 4, "open": 101.8, "high": 102.4, "low": 101.6, "close": 102.0, "volume": 1210 },
+    { "time": 5, "open": 100.8, "high": 101.4, "low": 100.6, "close": 101.0, "volume": 1175 },
+    { "time": 6, "open": 99.8, "high": 100.4, "low": 99.6, "close": 100.0, "volume": 1160 },
+    { "time": 7, "open": 98.8, "high": 99.4, "low": 98.6, "close": 99.0, "volume": 1190 },
+    { "time": 8, "open": 97.2, "high": 97.8, "low": 97.0, "close": 97.4, "volume": 1290 },
+    { "time": 9, "open": 98.4, "high": 99.0, "low": 98.2, "close": 98.6, "volume": 1325 },
+    { "time": 10, "open": 99.8, "high": 100.4, "low": 99.6, "close": 100.0, "volume": 1310 },
+    { "time": 11, "open": 101.3, "high": 101.9, "low": 101.1, "close": 101.5, "volume": 1350 },
+    { "time": 12, "open": 102.3, "high": 102.9, "low": 102.1, "close": 102.5, "volume": 1385 }
+  ]
+}

@@ -47,6 +47,14 @@ import {
   type ABCImprovedScenario,
   type ABCImprovedTarget,
 } from "@/lib/elliottABCEngine";
+import {
+  buildNoTradeSummary,
+  formatHigherTimeframeAlignmentLabel,
+  formatRiskClassificationLabel,
+  formatSetupQualityLabel,
+  formatValidationStatusLabel,
+} from "@/lib/elliott-engine/evidence-presentation";
+import type { NoTradeState } from "@/lib/elliott-engine/types";
 import { cn } from "@/lib/utils";
 import { METAL_SYMBOLS, type Candle, type MetalSymbolCode } from "@/lib/market-types";
 
@@ -114,6 +122,7 @@ type WaveAnalysis = {
   activeDirection: WaveTrend;
   validation: ReturnType<typeof validateWaveCount> | null;
   abcScenarios?: ABCImprovedScenario[];
+  abcNoTradeState?: NoTradeState | null;
 };
 
 export type MetalChartInteractionMode = InteractionMode;
@@ -144,6 +153,8 @@ type CorrectivePredictionTarget = {
   id: string;
   label: string;
   scenarioName?: string;
+  structureLabel?: string;
+  scenarioRole?: ABCImprovedScenario["scenarioRole"];
   startTime: number;
   startPrice: number;
   targetPrice: number;
@@ -156,6 +167,14 @@ type CorrectivePredictionTarget = {
   invalidationLevel?: number;
   targets?: ABCImprovedTarget[];
   channel?: ABCImprovedScenario["channel"];
+  validationStatusText?: string;
+  setupQualityText?: string;
+  higherTimeframeAlignmentText?: string;
+  riskText?: string;
+  promotionConditionReason?: string;
+  noTradeTitle?: string;
+  noTradeReasonSummary?: string;
+  noTradeConfirmations?: string[];
 };
 
 type OverlayCorrectivePrediction = CorrectivePredictionTarget & {
@@ -286,19 +305,20 @@ type OverlayPriceExtents = {
   fixed?: boolean;
 };
 
-const IMPULSE_COLOR = "#3b82f6";
+const IMPULSE_COLOR = "#58a6ff";
 const CORRECTIVE_COLOR = "#f59e0b";
 const DRAW_LINE_COLOR = "#a855f7";
 const FREEHAND_DRAW_COLOR = "#ec4899";
-const RESISTANCE_ZONE_FILL = "rgba(249, 115, 22, 0.22)";
+const RESISTANCE_ZONE_FILL = "rgba(249, 115, 22, 0.32)";
 const RESISTANCE_ZONE_STROKE = "#f59e0b";
-const RESISTANCE_ZONE_LABEL_FILL = "rgba(12, 18, 31, 0.92)";
-const RESISTANCE_ZONE_LABEL_STROKE = "rgba(245, 158, 11, 0.34)";
+const RESISTANCE_ZONE_LABEL_FILL = "rgba(8, 12, 22, 0.88)";
+const RESISTANCE_ZONE_LABEL_STROKE = "rgba(245, 158, 11, 0.42)";
 const FIB_LINE_COLOR = "rgba(216, 168, 77, 0.34)";
-const LABEL_BACKGROUND_FILL = "rgba(6, 17, 31, 0.9)";
-const LABEL_BACKGROUND_STROKE = "rgba(255, 255, 255, 0.08)";
+const LABEL_BACKGROUND_FILL = "rgba(6, 10, 18, 0.88)";
+const LABEL_BACKGROUND_STROKE = "rgba(255, 255, 255, 0.14)";
 const CHART_TIME_ZONE = "America/New_York";
-const WAVE_STROKE_WIDTH = 1.9;
+const WAVE_STROKE_WIDTH = 2.8;
+const WAVE_GLOW_STROKE_WIDTH = 4.8;
 const FIB_STROKE_WIDTH = 1;
 const EMPTY_OVERLAY: OverlayGeometry = {
   width: 0,
@@ -573,23 +593,23 @@ function getSmartLabelOffsetY(
   chartHeight: number,
   displayLabel: string,
 ) {
-  const baseOffset = displayLabel.length >= 5 ? 34 : 29;
+  const baseOffset = displayLabel.length >= 5 ? 38 : 33;
   let nextOffset = placement === "above" ? -baseOffset : baseOffset;
-  const labelHalfHeight = 12;
+  const labelHalfHeight = 14;
   const projectedTop = y + nextOffset - labelHalfHeight;
   const projectedBottom = y + nextOffset + labelHalfHeight;
 
-  if (projectedTop < 20) {
-    nextOffset = Math.abs(baseOffset) + 8;
-  } else if (projectedBottom > chartHeight - 20) {
-    nextOffset = -(Math.abs(baseOffset) + 8);
+  if (projectedTop < 24) {
+    nextOffset = Math.abs(baseOffset) + 10;
+  } else if (projectedBottom > chartHeight - 24) {
+    nextOffset = -(Math.abs(baseOffset) + 10);
   }
 
   return nextOffset;
 }
 
 function getLabelWidth(displayLabel: string) {
-  return Math.max(32, displayLabel.length * 7 + 16);
+  return Math.max(36, displayLabel.length * 7 + 20);
 }
 
 function buildWaveAnalysis(
@@ -757,7 +777,7 @@ function buildOverlayPoints(
         color,
         labelOffsetY,
         labelWidth: getLabelWidth(displayLabel),
-        labelHeight: 20,
+        labelHeight: 24,
       };
     })
     .filter((point): point is OverlayWavePoint => point !== null);
@@ -1084,12 +1104,21 @@ function getConfidenceLabelFromProbability(probability: number): ConfidenceLabel
   return "Low";
 }
 
+function formatCompactSetupLabel(confidenceLabel: ConfidenceLabel) {
+  return `${confidenceLabel} setup`;
+}
+
+function formatExpandedSetupLabel(confidenceLabel: ConfidenceLabel) {
+  return `${confidenceLabel} setup quality`;
+}
+
 function buildCorrectivePredictionTarget(
   count: WaveCount | null,
   validation: ReturnType<typeof validateWaveCount> | null,
   candles: Candle[],
   timeframeLabel: string,
   improvedScenario: ABCImprovedScenario | null = null,
+  noTradeState: NoTradeState | null = null,
 ): CorrectivePredictionTarget | null {
   if (!count || count.pattern !== "corrective" || count.points.length < 2) {
     return null;
@@ -1121,6 +1150,8 @@ function buildCorrectivePredictionTarget(
     id: `${count.anchor?.id ?? waveBPoint.id}-wave-c-prediction`,
     label: "Wave C Objective",
     scenarioName: improvedScenario?.name,
+    structureLabel: improvedScenario?.structureLabel,
+    scenarioRole: improvedScenario?.scenarioRole,
     startTime: waveBPoint.time,
     startPrice: waveBPoint.price,
     targetPrice: improvedScenario?.waveCProjection ?? futureProjection.nextTargetPrice,
@@ -1154,6 +1185,31 @@ function buildCorrectivePredictionTarget(
       reactionAnalysis?.invalidation?.level,
     targets: improvedScenario?.targets,
     channel: improvedScenario?.channel,
+    validationStatusText: improvedScenario
+      ? formatValidationStatusLabel(improvedScenario.evidence.validationStatus)
+      : validation?.isValid
+        ? "Valid structure"
+        : count.points.length >= 2
+          ? "Provisional structure"
+          : "Structure pending",
+    setupQualityText: improvedScenario
+      ? formatSetupQualityLabel(improvedScenario.evidence.setupQuality)
+      : formatExpandedSetupLabel(
+          reactionAnalysis?.primaryZone?.confidenceLabel ??
+            getConfidenceLabelFromProbability(probability),
+        ),
+    higherTimeframeAlignmentText: improvedScenario
+      ? formatHigherTimeframeAlignmentLabel(
+          improvedScenario.evidence.higherTimeframeAlignment,
+        )
+      : undefined,
+    riskText: improvedScenario
+      ? formatRiskClassificationLabel(improvedScenario.evidence.riskClassification)
+      : undefined,
+    promotionConditionReason: improvedScenario?.promotionCondition?.reason,
+    noTradeTitle: noTradeState?.title,
+    noTradeReasonSummary: noTradeState ? buildNoTradeSummary(noTradeState) : undefined,
+    noTradeConfirmations: noTradeState?.confirmationNeeded.map((item) => item.detail),
   } satisfies CorrectivePredictionTarget;
 }
 
@@ -2323,13 +2379,14 @@ export function MetalChart({
     [candles, interactionMode, wavePoints],
   );
   const waveAnalysis = useMemo(() => {
-    if (interactionMode !== "auto" || !autoABCDetection?.scenarios.length) {
+    if (interactionMode !== "auto") {
       return baseWaveAnalysis;
     }
 
     return {
       ...baseWaveAnalysis,
-      abcScenarios: autoABCDetection.scenarios,
+      abcScenarios: autoABCDetection?.scenarios ?? [],
+      abcNoTradeState: autoABCDetection?.noTradeState ?? null,
     } satisfies WaveAnalysis;
   }, [autoABCDetection, baseWaveAnalysis, interactionMode]);
   const probabilityZoneTargets = useMemo(() => {
@@ -2373,6 +2430,7 @@ export function MetalChart({
         candles,
         timeframeLabel,
         improvedScenario,
+        autoABCDetection?.noTradeState ?? null,
       );
     },
     [
@@ -2398,6 +2456,7 @@ export function MetalChart({
           candles,
           timeframeLabel,
           scenario,
+          autoABCDetection?.noTradeState ?? null,
         ),
       )
       .filter(
@@ -3684,6 +3743,61 @@ export function MetalChart({
         ? "Impulse"
         : "No Waves";
   const primaryCorrectiveProjectionZoneId = "primary-corrective-projection";
+  const getZoneSetupText = (confidenceLabel: ConfidenceLabel) =>
+    formatCompactSetupLabel(confidenceLabel);
+  const getPredictionStatusLine = (prediction: OverlayCorrectivePrediction) =>
+    prediction.noTradeTitle
+      ? truncateOverlayText(
+          `${prediction.noTradeTitle} · ${
+            prediction.noTradeReasonSummary ?? "Awaiting confirmation"
+          }`,
+          30,
+        )
+      : prediction.validationStatusText
+      ? truncateOverlayText(
+          `${prediction.validationStatusText} · ${
+            prediction.setupQualityText ?? getZoneSetupText(prediction.confidenceLabel)
+          }`,
+          30,
+        )
+      : truncateOverlayText(
+          prediction.setupQualityText ?? getZoneSetupText(prediction.confidenceLabel),
+          30,
+        );
+  const getPredictionTooltipText = (prediction: OverlayCorrectivePrediction) =>
+    [
+      prediction.scenarioRole
+        ? `Scenario: ${
+            prediction.scenarioRole === "primary" || prediction.scenarioRole === "sole"
+              ? "Primary"
+              : prediction.scenarioRole === "alternate"
+                ? "Alternate"
+                : "Reserve"
+          }`
+        : null,
+      prediction.structureLabel,
+      prediction.label,
+      `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
+      prediction.validationStatusText,
+      prediction.setupQualityText ??
+        formatExpandedSetupLabel(prediction.confidenceLabel),
+      prediction.higherTimeframeAlignmentText,
+      prediction.riskText,
+      prediction.noTradeTitle ? `No-trade: ${prediction.noTradeTitle}` : null,
+      ...(prediction.noTradeConfirmations ?? []).map(
+        (confirmation) => `Confirmation: ${confirmation}`,
+      ),
+      prediction.promotionConditionReason
+        ? `Promotion: ${prediction.promotionConditionReason}`
+        : null,
+      prediction.reasonSummary,
+      ...prediction.reasons,
+      prediction.invalidationLevel
+        ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
+        : null,
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
   const getPrimaryCorrectivePredictionZoneGeometry = (
     prediction: OverlayCorrectivePrediction,
   ) => {
@@ -3743,18 +3857,7 @@ export function MetalChart({
       Math.max(overlayGeometry.width - 20, 20),
     );
     const cMarkerY = bandTopY - 12;
-    const tooltipLines = [
-      prediction.label,
-      `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
-      `Confidence: ${prediction.confidenceLabel} (${Math.round(prediction.confidence)}%)`,
-      prediction.reasonSummary,
-      ...prediction.reasons,
-      prediction.invalidationLevel
-        ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
-        : null,
-    ]
-      .filter((line): line is string => Boolean(line))
-      .join("\n");
+    const tooltipLines = getPredictionTooltipText(prediction);
     const hitboxX = Math.min(zoneX, labelX, cMarkerX - 10);
     const hitboxY = Math.min(bandTopY, labelY, cMarkerY - 10);
     const hitboxRight = Math.max(
@@ -3930,7 +4033,7 @@ export function MetalChart({
             fontWeight="600"
             textAnchor="middle"
           >
-            {`${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}% Fibonacci`}
+            {getPredictionStatusLine(prediction)}
           </text>
         ) : (
           <>
@@ -3942,7 +4045,8 @@ export function MetalChart({
               fontWeight="600"
               textAnchor="middle"
             >
-              {`Confidence: ${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}%`}
+              {prediction.setupQualityText ??
+                formatExpandedSetupLabel(prediction.confidenceLabel)}
             </text>
             <text
               x={geometry.labelX + geometry.labelWidth / 2}
@@ -4028,7 +4132,9 @@ export function MetalChart({
       altLabel,
       prediction.scenarioName,
       `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
-      `Confidence: ${Math.round(prediction.confidence)}%`,
+      prediction.validationStatusText,
+      prediction.setupQualityText ??
+        formatExpandedSetupLabel(prediction.confidenceLabel),
       prediction.invalidationLevel
         ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
         : null,
@@ -4154,7 +4260,15 @@ export function MetalChart({
           fontWeight="600"
           textAnchor="middle"
         >
-          {`${Math.round(prediction.confidence)}%`}
+          {truncateOverlayText(
+            `${
+              prediction.scenarioRole === "reserve" ? "Reserve" : "Alternate"
+            } · ${
+              prediction.setupQualityText ??
+              getZoneSetupText(prediction.confidenceLabel)
+            }`,
+            28,
+          )}
         </text>
       </g>
     );
@@ -4269,8 +4383,10 @@ export function MetalChart({
             ? "Line Tool · Click End Point"
             : "Line Tool · Click Start Point"
           : interactionMode === "auto"
-            ? waveAnalysis.activePattern === "corrective"
-              ? "Auto ABC Setup"
+            ? autoABCDetection?.noTradeState
+              ? `Auto Setup · ${autoABCDetection.noTradeState.title}`
+              : waveAnalysis.activePattern === "corrective"
+                ? "Auto ABC Setup"
               : waveAnalysis.activePattern === "impulse"
                 ? "Auto Impulse Setup"
                 : "Auto Setup"
@@ -4383,9 +4499,9 @@ export function MetalChart({
           >
           {overlayGeometry.resistanceZones.map((zone) => {
             const isActive = activeResistanceZoneId === zone.id;
-            const zoneLabelBoxWidth = 154;
-            const zoneLabelBoxHeight = 36;
-            const zoneLabelBoxX = Math.max(16, overlayGeometry.width - zoneLabelBoxWidth - 18);
+            const zoneLabelBoxWidth = 168;
+            const zoneLabelBoxHeight = 40;
+            const zoneLabelBoxX = Math.max(16, overlayGeometry.width - zoneLabelBoxWidth - 20);
             const zoneLabelBoxY = clamp(
               zone.centerY - zoneLabelBoxHeight / 2,
               zone.topY + 6,
@@ -4402,7 +4518,7 @@ export function MetalChart({
                   rx={8}
                   fill={RESISTANCE_ZONE_FILL}
                   stroke={isActive ? "rgba(253, 186, 116, 0.75)" : "rgba(245, 158, 11, 0.38)"}
-                  strokeWidth={isActive ? 1.4 : 1.1}
+                  strokeWidth={isActive ? 1.6 : 1.2}
                   className="pointer-events-auto cursor-grab"
                   onPointerDown={startResistanceZoneInteraction(zone.id, "move")}
                 />
@@ -4412,7 +4528,7 @@ export function MetalChart({
                   x2={overlayGeometry.width - 10}
                   y2={zone.topY}
                   stroke={RESISTANCE_ZONE_STROKE}
-                  strokeWidth={2}
+                  strokeWidth={3}
                 />
                 <line
                   x1={10}
@@ -4420,7 +4536,7 @@ export function MetalChart({
                   x2={overlayGeometry.width - 10}
                   y2={zone.bottomY}
                   stroke={RESISTANCE_ZONE_STROKE}
-                  strokeWidth={2}
+                  strokeWidth={3}
                 />
                 <line
                   x1={10}
@@ -4444,6 +4560,25 @@ export function MetalChart({
                 />
                 <g pointerEvents="none">
                   <rect
+                    x={Math.max(20, overlayGeometry.width / 2 - 42)}
+                    y={clamp(zone.centerY - 13, zone.topY + 8, Math.max(zone.bottomY - 26 - 8, zone.topY + 8))}
+                    width={84}
+                    height={26}
+                    rx={13}
+                    fill="rgba(10, 16, 28, 0.84)"
+                    stroke="rgba(245, 158, 11, 0.18)"
+                  />
+                  <text
+                    x={overlayGeometry.width / 2}
+                    y={clamp(zone.centerY + 5, zone.topY + 24, Math.max(zone.bottomY - 8, zone.topY + 24))}
+                    fill="#fde68a"
+                    fontSize="12"
+                    fontWeight="900"
+                    textAnchor="middle"
+                  >
+                    {zone.percentLabel}
+                  </text>
+                  <rect
                     x={zoneLabelBoxX}
                     y={zoneLabelBoxY}
                     width={zoneLabelBoxWidth}
@@ -4454,19 +4589,19 @@ export function MetalChart({
                   />
                   <text
                     x={zoneLabelBoxX + zoneLabelBoxWidth / 2}
-                    y={zoneLabelBoxY + 13}
-                    fill="#fde68a"
-                    fontSize="8.2"
-                    fontWeight="700"
+                    y={zoneLabelBoxY + 14}
+                    fill="#fef3c7"
+                    fontSize="8.7"
+                    fontWeight="800"
                     textAnchor="middle"
                   >
                     Resistance Zone
                   </text>
                   <text
                     x={zoneLabelBoxX + zoneLabelBoxWidth / 2}
-                    y={zoneLabelBoxY + 26}
+                    y={zoneLabelBoxY + 29}
                     fill="#f59e0b"
-                    fontSize="10.5"
+                    fontSize="11"
                     fontWeight="800"
                     textAnchor="middle"
                   >
@@ -4491,12 +4626,12 @@ export function MetalChart({
                 rx={8}
                 fill="rgba(249, 115, 22, 0.16)"
                 stroke="rgba(245, 158, 11, 0.42)"
-                strokeWidth={1.1}
+                strokeWidth={1.2}
                 strokeDasharray="4 4"
               />
               <g pointerEvents="none">
                 <rect
-                  x={Math.max(16, overlayGeometry.width - 164)}
+                  x={Math.max(16, overlayGeometry.width - 176)}
                   y={clamp(
                     overlayGeometry.draftResistanceZone.centerY - 16,
                     overlayGeometry.draftResistanceZone.topY + 6,
@@ -4505,15 +4640,15 @@ export function MetalChart({
                       overlayGeometry.draftResistanceZone.topY + 6,
                     ),
                   )}
-                  width={148}
-                  height={32}
+                  width={160}
+                  height={36}
                   rx={10}
                   fill="rgba(12, 18, 31, 0.82)"
                   stroke="rgba(245, 158, 11, 0.28)"
                   strokeDasharray="4 4"
                 />
                 <text
-                  x={Math.max(16, overlayGeometry.width - 164) + 74}
+                  x={Math.max(16, overlayGeometry.width - 176) + 80}
                   y={clamp(
                     overlayGeometry.draftResistanceZone.centerY - 4,
                     overlayGeometry.draftResistanceZone.topY + 18,
@@ -4523,14 +4658,14 @@ export function MetalChart({
                     ),
                   )}
                   fill="#fde68a"
-                  fontSize="8"
+                  fontSize="8.4"
                   fontWeight="700"
                   textAnchor="middle"
                 >
                   Resistance Zone
                 </text>
                 <text
-                  x={Math.max(16, overlayGeometry.width - 164) + 74}
+                  x={Math.max(16, overlayGeometry.width - 176) + 80}
                   y={clamp(
                     overlayGeometry.draftResistanceZone.centerY + 9,
                     overlayGeometry.draftResistanceZone.topY + 30,
@@ -4540,7 +4675,7 @@ export function MetalChart({
                     ),
                   )}
                   fill="#f59e0b"
-                  fontSize="10.2"
+                  fontSize="10.8"
                   fontWeight="800"
                   textAnchor="middle"
                 >
@@ -4574,7 +4709,7 @@ export function MetalChart({
                 const labelBoxX = Math.max(12, overlayGeometry.width - labelBoxWidth - 12);
                 const tooltipLines = [
                   zone.label,
-                  `Confidence: ${zone.confidenceLabel} (${Math.round(zone.confidence)}%)`,
+                  `Setup quality: ${formatExpandedSetupLabel(zone.confidenceLabel)}`,
                   zone.reasonSummary,
                   ...zone.reasons,
                   zone.invalidationLevel
@@ -4633,7 +4768,7 @@ export function MetalChart({
                       fontWeight="600"
                       textAnchor="middle"
                     >
-                      {`Confidence: ${zone.confidenceLabel}`}
+                      {`Setup: ${getZoneSetupText(zone.confidenceLabel)}`}
                     </text>
                     <text
                       x={labelBoxX + labelBoxWidth / 2}
@@ -4819,18 +4954,7 @@ export function MetalChart({
                   Math.max(overlayGeometry.width - 20, 20),
                 );
                 const cMarkerY = bandTopY - 12;
-                const tooltipLines = [
-                  prediction.label,
-                  `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
-                  `Confidence: ${prediction.confidenceLabel} (${Math.round(prediction.confidence)}%)`,
-                  prediction.reasonSummary,
-                  ...prediction.reasons,
-                  prediction.invalidationLevel
-                    ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
-                    : null,
-                ]
-                  .filter((line): line is string => Boolean(line))
-                  .join("\n");
+                const tooltipLines = getPredictionTooltipText(prediction);
 
                 return (
                   <>
@@ -4952,7 +5076,7 @@ export function MetalChart({
                         fontWeight="600"
                         textAnchor="middle"
                       >
-                        {`${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}% Fibonacci`}
+                        {getPredictionStatusLine(prediction)}
                       </text>
                     ) : (
                       <>
@@ -4964,7 +5088,8 @@ export function MetalChart({
                           fontWeight="600"
                           textAnchor="middle"
                         >
-                          {`Confidence: ${prediction.confidenceLabel} · ${Math.round(prediction.confidence)}%`}
+                          {prediction.setupQualityText ??
+                            formatExpandedSetupLabel(prediction.confidenceLabel)}
                         </text>
                         <text
                           x={labelX + labelWidth / 2}
@@ -5047,33 +5172,55 @@ export function MetalChart({
           ))}
 
           {impulseSegments.map((segment) => (
-            <line
-              key={segment.id}
-              x1={segment.x1}
-              y1={segment.y1}
-              x2={segment.x2}
-              y2={segment.y2}
-              stroke={segment.color}
-              strokeWidth={WAVE_STROKE_WIDTH}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity={0.94}
-            />
+            <g key={segment.id}>
+              <line
+                x1={segment.x1}
+                y1={segment.y1}
+                x2={segment.x2}
+                y2={segment.y2}
+                stroke="rgba(88, 166, 255, 0.2)"
+                strokeWidth={WAVE_GLOW_STROKE_WIDTH}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <line
+                x1={segment.x1}
+                y1={segment.y1}
+                x2={segment.x2}
+                y2={segment.y2}
+                stroke={segment.color}
+                strokeWidth={WAVE_STROKE_WIDTH}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.98}
+              />
+            </g>
           ))}
 
           {correctiveSegments.map((segment) => (
-            <line
-              key={segment.id}
-              x1={segment.x1}
-              y1={segment.y1}
-              x2={segment.x2}
-              y2={segment.y2}
-              stroke={segment.color}
-              strokeWidth={WAVE_STROKE_WIDTH}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity={0.94}
-            />
+            <g key={segment.id}>
+              <line
+                x1={segment.x1}
+                y1={segment.y1}
+                x2={segment.x2}
+                y2={segment.y2}
+                stroke="rgba(245, 158, 11, 0.2)"
+                strokeWidth={WAVE_GLOW_STROKE_WIDTH}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <line
+                x1={segment.x1}
+                y1={segment.y1}
+                x2={segment.x2}
+                y2={segment.y2}
+                stroke={segment.color}
+                strokeWidth={WAVE_STROKE_WIDTH}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.98}
+              />
+            </g>
           ))}
 
           {[...overlayGeometry.impulsePoints, ...overlayGeometry.correctivePoints].map((point) => (
@@ -5084,7 +5231,7 @@ export function MetalChart({
                 r={draggingPointId === point.id ? 6.5 : 5}
                 fill="#06111f"
                 stroke={point.color}
-                strokeWidth={1.8}
+                strokeWidth={2}
                 className={cn(
                   "pointer-events-auto cursor-grab transition-all",
                   interactionMode !== "manual" && "cursor-default",
@@ -5096,16 +5243,16 @@ export function MetalChart({
                 y={point.y + point.labelOffsetY - point.labelHeight / 2 - 2}
                 width={point.labelWidth}
                 height={point.labelHeight}
-                rx={9}
+                rx={12}
                 fill={LABEL_BACKGROUND_FILL}
                 stroke={LABEL_BACKGROUND_STROKE}
               />
               <text
                 x={point.x}
-                y={point.y + point.labelOffsetY + 4}
+                y={point.y + point.labelOffsetY + 5.6}
                 fill={point.color}
-                fontSize="13.25"
-                fontWeight="700"
+                fontSize="15"
+                fontWeight="800"
                 textAnchor="middle"
               >
                 {point.displayLabel}

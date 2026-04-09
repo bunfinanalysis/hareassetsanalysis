@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --test --experimental-strip-types --experimental-specifier-resolution=node tests/*.test.ts",
-    "refresh:yahoo": "node scripts/refresh-yahoo-cache.mjs"
+    "refresh:yahoo": "node scripts/refresh-yahoo-cache.mjs",
+    "eval:abc": "node --experimental-strip-types --experimental-specifier-resolution=node scripts/run-abc-eval.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",
