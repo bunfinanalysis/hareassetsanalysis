@@ -248,11 +248,16 @@ test("no-trade presentation helpers render disciplined user-facing labels", () =
     new URL("../components/WaveAnalysisPanel.tsx", import.meta.url),
     "utf8",
   );
+  const railPresentationSource = readFileSync(
+    new URL("../lib/elliott-engine/analysis-rail-presentation.ts", import.meta.url),
+    "utf8",
+  );
   const metalChartSource = readFileSync(
     new URL("../components/charts/metal-chart.tsx", import.meta.url),
     "utf8",
   );
 
-  assert.match(wavePanelSource, /No Validated Directional Edge|No-Trade State/);
-  assert.match(metalChartSource, /Auto Setup ·/);
+  assert.match(wavePanelSource, /Stand Aside Detail/);
+  assert.match(railPresentationSource, /Current setup|Can I act yet\?/);
+  assert.match(metalChartSource, /Auto ABC ·/);
 });

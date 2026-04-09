@@ -5,6 +5,7 @@ import test from "node:test";
 import { createScenarioPriceClamp } from "../lib/elliott-engine/shared.ts";
 import {
   buildScenarioEvidenceBadge,
+  buildScenarioEdgeLabel,
   buildScenarioEvidenceSummary,
   buildTargetLadderRows,
   formatHigherTimeframeAlignmentLabel,
@@ -12,6 +13,7 @@ import {
   formatSetupQualityLabel,
   formatValidationStatusLabel,
 } from "../lib/elliott-engine/evidence-presentation.ts";
+import { buildAnalysisRailSections } from "../lib/elliott-engine/analysis-rail-presentation.ts";
 import {
   buildCorrectiveScenarioDisplayPlans,
   rankInstitutionalScenario,
@@ -96,6 +98,7 @@ test("evidence presentation helpers map engine output into non-percentage labels
   assert.match(summary, /\d+ pass · \d+ warning · \d+ fail/);
   assert.equal(formatValidationStatusLabel("valid"), "Valid structure");
   assert.equal(formatSetupQualityLabel("high"), "High setup quality");
+  assert.equal(buildScenarioEdgeLabel(scenario), "Needs more confirmation");
   assert.equal(
     formatHigherTimeframeAlignmentLabel("aligned"),
     "Higher timeframe aligned",
@@ -111,9 +114,37 @@ test("evidence presentation helpers map engine output into non-percentage labels
   );
 });
 
+test("analysis rail presentation orders sections for disciplined review", () => {
+  const scenario = createImprovedScenarioFixture();
+  const sections = buildAnalysisRailSections({
+    activeCount: scenario.legacyScenario.count,
+    reactionAnalysis: null,
+    primaryScenario: scenario,
+    alternateScenario: null,
+    noTradeState: null,
+    pricePrecision: 2,
+  });
+
+  assert.deepEqual(
+    sections.map((section) => section.key),
+    [
+      "market-status",
+      "edge-status",
+      "confirmation",
+      "invalidation",
+      "primary-scenario",
+      "risk-notes",
+    ],
+  );
+});
+
 test("affected analysis views do not contain percentage-confidence strings", () => {
   const wavePanelSource = readFileSync(
     new URL("../components/WaveAnalysisPanel.tsx", import.meta.url),
+    "utf8",
+  );
+  const railPresentationSource = readFileSync(
+    new URL("../lib/elliott-engine/analysis-rail-presentation.ts", import.meta.url),
     "utf8",
   );
   const metalChartSource = readFileSync(
@@ -133,7 +164,10 @@ test("affected analysis views do not contain percentage-confidence strings", () 
     assert.doesNotMatch(metalChartSource, pattern);
   }
 
-  assert.match(wavePanelSource, /Scenario Evidence/);
-  assert.match(wavePanelSource, /setup quality/i);
-  assert.match(metalChartSource, /Setup quality:/);
+  assert.match(wavePanelSource, /buildAnalysisRailSections/);
+  assert.match(railPresentationSource, /Current setup/);
+  assert.match(railPresentationSource, /Can I act yet\?/);
+  assert.match(railPresentationSource, /What needs to happen\?/);
+  assert.match(railPresentationSource, /Wrong if/);
+  assert.match(metalChartSource, /Wave C Zone/);
 });

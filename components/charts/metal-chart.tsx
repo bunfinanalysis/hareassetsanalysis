@@ -54,6 +54,10 @@ import {
   formatSetupQualityLabel,
   formatValidationStatusLabel,
 } from "@/lib/elliott-engine/evidence-presentation";
+import {
+  buildOverlayActionLine,
+  shouldShowDetailedAlternateOverlay,
+} from "@/lib/elliott-engine/overlay-presentation";
 import type { NoTradeState } from "@/lib/elliott-engine/types";
 import { cn } from "@/lib/utils";
 import { METAL_SYMBOLS, type Candle, type MetalSymbolCode } from "@/lib/market-types";
@@ -61,6 +65,7 @@ import { METAL_SYMBOLS, type Candle, type MetalSymbolCode } from "@/lib/market-t
 type MetalChartProps = {
   candles: Candle[];
   isLoading: boolean;
+  isFocusMode?: boolean;
   symbol: MetalSymbolCode;
   timeframeLabel: string;
   wavePoints?: WavePoint[];
@@ -2216,6 +2221,7 @@ function pickCompanionDetectedCandidate(
 export function MetalChart({
   candles,
   isLoading,
+  isFocusMode = false,
   symbol,
   timeframeLabel,
   wavePoints: controlledWavePoints,
@@ -3736,36 +3742,65 @@ export function MetalChart({
     () => buildLineSegments(overlayGeometry.correctivePoints),
     [overlayGeometry.correctivePoints],
   );
-  const activeWaveLabel =
-    waveAnalysis.activePattern === "corrective"
-      ? "Corrective"
-      : waveAnalysis.activePattern === "impulse"
-        ? "Impulse"
-        : "No Waves";
+  const chartStatusText = isResistanceMode
+    ? typeof pendingResistanceZoneAnchor === "number"
+      ? "Resistance Tool · Click Or Drag Bottom"
+      : "Resistance Tool · Click Or Drag Zone"
+    : isPencilDrawMode
+      ? "Pencil Tool · Draw Freely"
+      : isDrawLineMode
+        ? pendingLineAnchor
+          ? "Line Tool · Click End Point"
+          : "Line Tool · Click Start Point"
+        : interactionMode === "auto"
+          ? autoABCDetection?.noTradeState
+            ? "Auto ABC · No clear edge"
+            : waveAnalysis.activePattern === "corrective"
+              ? "Auto ABC · Scenario view"
+              : waveAnalysis.activePattern === "impulse"
+                ? "Auto Impulse Setup"
+                : "Auto Setup"
+          : "";
+  const chartHeaderHeightClass = isFocusMode ? "h-16" : "h-28";
+  const chartViewportTopClass = isFocusMode ? "top-16" : "top-28";
+  const chartViewportBottomClass = isFocusMode ? "bottom-12" : "bottom-16";
   const primaryCorrectiveProjectionZoneId = "primary-corrective-projection";
   const getZoneSetupText = (confidenceLabel: ConfidenceLabel) =>
     formatCompactSetupLabel(confidenceLabel);
-  const getPredictionStatusLine = (prediction: OverlayCorrectivePrediction) =>
-    prediction.noTradeTitle
-      ? truncateOverlayText(
-          `${prediction.noTradeTitle} · ${
-            prediction.noTradeReasonSummary ?? "Awaiting confirmation"
-          }`,
-          30,
-        )
-      : prediction.validationStatusText
-      ? truncateOverlayText(
-          `${prediction.validationStatusText} · ${
-            prediction.setupQualityText ?? getZoneSetupText(prediction.confidenceLabel)
-          }`,
-          30,
-        )
-      : truncateOverlayText(
-          prediction.setupQualityText ?? getZoneSetupText(prediction.confidenceLabel),
-          30,
-        );
+  const getPredictionActionLine = (prediction: OverlayCorrectivePrediction) =>
+    truncateOverlayText(
+      buildOverlayActionLine(
+        {
+          noTradeTitle: prediction.noTradeTitle,
+          noTradeConfirmations: prediction.noTradeConfirmations,
+          validationStatusText: prediction.validationStatusText,
+          setupQualityText: prediction.setupQualityText,
+          fallbackSetupText: getZoneSetupText(prediction.confidenceLabel),
+          invalidationLevel: prediction.invalidationLevel,
+          startPrice: prediction.startPrice,
+          targetPrice: prediction.targetPrice,
+        },
+        formatOverlayPrice,
+      ),
+      30,
+    );
   const getPredictionTooltipText = (prediction: OverlayCorrectivePrediction) =>
     [
+      prediction.noTradeTitle
+        ? `Status: ${prediction.noTradeTitle}`
+        : prediction.validationStatusText
+          ? `Status: ${prediction.validationStatusText}`
+          : null,
+      prediction.setupQualityText ? `Setup: ${prediction.setupQualityText}` : null,
+      prediction.invalidationLevel
+        ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
+        : null,
+      ...(prediction.noTradeConfirmations ?? []).map(
+        (confirmation) => `Confirmation: ${confirmation}`,
+      ),
+      prediction.promotionConditionReason
+        ? `Promotion: ${prediction.promotionConditionReason}`
+        : null,
       prediction.scenarioRole
         ? `Scenario: ${
             prediction.scenarioRole === "primary" || prediction.scenarioRole === "sole"
@@ -3778,23 +3813,10 @@ export function MetalChart({
       prediction.structureLabel,
       prediction.label,
       `Target: ${formatOverlayPrice(prediction.targetPrice)}`,
-      prediction.validationStatusText,
-      prediction.setupQualityText ??
-        formatExpandedSetupLabel(prediction.confidenceLabel),
       prediction.higherTimeframeAlignmentText,
       prediction.riskText,
-      prediction.noTradeTitle ? `No-trade: ${prediction.noTradeTitle}` : null,
-      ...(prediction.noTradeConfirmations ?? []).map(
-        (confirmation) => `Confirmation: ${confirmation}`,
-      ),
-      prediction.promotionConditionReason
-        ? `Promotion: ${prediction.promotionConditionReason}`
-        : null,
       prediction.reasonSummary,
       ...prediction.reasons,
-      prediction.invalidationLevel
-        ? `Invalidation: ${formatOverlayPrice(prediction.invalidationLevel)}`
-        : null,
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
@@ -4033,7 +4055,7 @@ export function MetalChart({
             fontWeight="600"
             textAnchor="middle"
           >
-            {getPredictionStatusLine(prediction)}
+            {getPredictionActionLine(prediction)}
           </text>
         ) : (
           <>
@@ -4114,8 +4136,13 @@ export function MetalChart({
       Math.max(overlayGeometry.width - zoneWidth - 14, prediction.startX + 20),
     );
     const zoneCenterX = zoneX + zoneWidth / 2;
-    const labelWidth = 88;
-    const labelHeight = 26;
+    const projectionZoneId = `${prediction.id}-alt-${index}`;
+    const isDetailed = shouldShowDetailedAlternateOverlay(
+      hoveredProjectionZoneId === projectionZoneId,
+      overlayGeometry.alternateCorrectivePredictions.length,
+    );
+    const labelWidth = isDetailed ? 88 : 64;
+    const labelHeight = isDetailed ? 26 : 16;
     const labelX = clamp(
       zoneCenterX - labelWidth / 2,
       12,
@@ -4126,7 +4153,6 @@ export function MetalChart({
       12,
       Math.max(overlayGeometry.height - labelHeight - 12, 12),
     );
-    const projectionZoneId = `${prediction.id}-alt-${index}`;
     const altLabel = `Alt ${index + 2} C Zone`;
     const tooltipLines = [
       altLabel,
@@ -4158,6 +4184,7 @@ export function MetalChart({
       labelWidth,
       labelX,
       labelY,
+      isDetailed,
       projectionZoneId,
       tooltipLines,
       zoneCenterX,
@@ -4244,32 +4271,26 @@ export function MetalChart({
         />
         <text
           x={geometry.labelX + geometry.labelWidth / 2}
-          y={geometry.labelY + 11}
+          y={geometry.labelY + (geometry.isDetailed ? 11 : 11.4)}
           fill="#fed7aa"
-          fontSize="8.3"
+          fontSize={geometry.isDetailed ? "8.3" : "7.9"}
           fontWeight="700"
           textAnchor="middle"
         >
-          {geometry.altLabel}
+          {geometry.isDetailed ? geometry.altLabel : `Alt ${index + 2}`}
         </text>
-        <text
-          x={geometry.labelX + geometry.labelWidth / 2}
-          y={geometry.labelY + 21}
-          fill="#fdba74"
-          fontSize="7.8"
-          fontWeight="600"
-          textAnchor="middle"
-        >
-          {truncateOverlayText(
-            `${
-              prediction.scenarioRole === "reserve" ? "Reserve" : "Alternate"
-            } · ${
-              prediction.setupQualityText ??
-              getZoneSetupText(prediction.confidenceLabel)
-            }`,
-            28,
-          )}
-        </text>
+        {geometry.isDetailed ? (
+          <text
+            x={geometry.labelX + geometry.labelWidth / 2}
+            y={geometry.labelY + 21}
+            fill="#fdba74"
+            fontSize="7.8"
+            fontWeight="600"
+            textAnchor="middle"
+          >
+            {getPredictionActionLine(prediction)}
+          </text>
+        ) : null}
       </g>
     );
   };
@@ -4302,27 +4323,47 @@ export function MetalChart({
   };
 
   return (
-    <div className="relative flex h-full min-h-[540px] max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0">
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-28 border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,16,28,0.92),rgba(8,13,24,0.68),rgba(8,13,24,0))]" />
+    <div
+      className={cn(
+        "relative flex h-full max-h-full flex-1 overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(9,14,26,0.94),rgba(6,10,19,0.98))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] xl:min-h-0",
+        isFocusMode ? "min-h-[clamp(680px,86dvh,1120px)]" : "min-h-[540px]",
+      )}
+    >
+      <div
+        className={cn(
+          "pointer-events-none absolute inset-x-0 top-0 z-[1] border-b border-white/6 bg-[linear-gradient(180deg,rgba(10,16,28,0.92),rgba(8,13,24,0.68),rgba(8,13,24,0))]",
+          chartHeaderHeightClass,
+        )}
+      />
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 py-3.5">
+      <div
+        className={cn(
+          "pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4",
+          isFocusMode ? "py-2" : "py-3.5",
+        )}
+      >
         <div>
           <p className="text-[11px] uppercase tracking-[0.34em] text-muted-foreground">
             Live Chart
           </p>
-          <p className="mt-0.5 text-sm font-medium text-foreground">
+          <p className={cn("mt-0.5 font-medium text-foreground", isFocusMode ? "text-[13px]" : "text-sm")}>
             {METAL_SYMBOLS[symbol].displayName} · {timeframeLabel}
           </p>
         </div>
       </div>
 
-      <div className="absolute right-4 top-4 z-30 flex flex-wrap items-center gap-2">
+      <div
+        className={cn(
+          "absolute right-4 z-30 flex flex-wrap items-center gap-2",
+          isFocusMode ? "top-2.5" : "top-4",
+        )}
+      >
         <div className="flex items-center rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl">
           <Button
             size="sm"
             variant={interactionMode === "manual" && manualWaveMode === "impulse" ? "default" : "ghost"}
             className={cn(
-              "h-8 px-3 text-xs",
+              isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
               !(interactionMode === "manual" && manualWaveMode === "impulse") &&
                 "text-muted-foreground",
             )}
@@ -4338,7 +4379,7 @@ export function MetalChart({
             size="sm"
             variant={interactionMode === "manual" && manualWaveMode === "corrective" ? "default" : "ghost"}
             className={cn(
-              "h-8 px-3 text-xs",
+              isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
               !(interactionMode === "manual" && manualWaveMode === "corrective") &&
                 "text-muted-foreground",
             )}
@@ -4355,7 +4396,9 @@ export function MetalChart({
         <Button
           size="sm"
           variant="outline"
-          className="h-8 px-3 text-xs"
+          className={cn(
+            isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
+          )}
           onClick={handleAutoDetectWaves}
         >
           Auto-Detect Waves
@@ -4364,45 +4407,37 @@ export function MetalChart({
         <Button
           size="sm"
           variant="outline"
-          className="h-8 px-3 text-xs"
+          className={cn(
+            isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
+          )}
           onClick={handleClearWaves}
         >
           Clear Waves
         </Button>
       </div>
 
-      <div className="pointer-events-none absolute left-4 top-12 z-20 rounded-xl border border-white/8 bg-[rgba(6,11,21,0.76)] px-3 py-1.5 text-[10px] uppercase tracking-[0.22em] text-muted-foreground shadow-[0_16px_40px_rgba(0,0,0,0.16)] backdrop-blur-xl">
-        {isResistanceMode
-          ? typeof pendingResistanceZoneAnchor === "number"
-            ? "Resistance Tool · Click Or Drag Bottom"
-            : "Resistance Tool · Click Or Drag Zone"
-          : isPencilDrawMode
-            ? "Pencil Tool · Draw Freely"
-          : isDrawLineMode
-          ? pendingLineAnchor
-            ? "Line Tool · Click End Point"
-            : "Line Tool · Click Start Point"
-          : interactionMode === "auto"
-            ? autoABCDetection?.noTradeState
-              ? `Auto Setup · ${autoABCDetection.noTradeState.title}`
-              : waveAnalysis.activePattern === "corrective"
-                ? "Auto ABC Setup"
-              : waveAnalysis.activePattern === "impulse"
-                ? "Auto Impulse Setup"
-                : "Auto Setup"
-            : `${activeWaveLabel} · ${
-                manualWaveMode === "impulse"
-                  ? "Click To Plot 5-Wave"
-                  : "Click To Plot 3-Wave"
-              }`}
-      </div>
+      {chartStatusText ? (
+        <div
+          className={cn(
+            "pointer-events-none absolute left-4 z-20 rounded-xl border border-white/8 bg-[rgba(6,11,21,0.76)] px-3 py-1.5 text-[10px] uppercase tracking-[0.22em] text-muted-foreground shadow-[0_16px_40px_rgba(0,0,0,0.16)] backdrop-blur-xl",
+            isFocusMode ? "top-8" : "top-12",
+          )}
+        >
+          {chartStatusText}
+        </div>
+      ) : null}
 
-      <div className="absolute bottom-3 right-4 z-30 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl">
+      <div
+        className={cn(
+          "absolute right-4 z-30 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(6,11,21,0.82)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.2)] backdrop-blur-xl",
+          isFocusMode ? "bottom-2" : "bottom-3",
+        )}
+      >
         <Button
           size="sm"
           variant={isResistanceMode ? "default" : "outline"}
           className={cn(
-            "h-8 px-3 text-xs",
+            isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
             isResistanceMode &&
               "bg-[rgba(249,115,22,0.18)] border-[rgba(251,146,60,0.35)] text-orange-100 hover:bg-[rgba(249,115,22,0.22)]",
           )}
@@ -4414,7 +4449,9 @@ export function MetalChart({
         <Button
           size="sm"
           variant="outline"
-          className="h-8 px-3 text-xs"
+          className={cn(
+            isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
+          )}
           disabled={
             resistanceZones.length === 0 &&
             !draftResistanceZone &&
@@ -4429,7 +4466,9 @@ export function MetalChart({
           size="sm"
           variant="outline"
           className={cn(
-            "h-8 px-2.5 text-xs border-pink-400/25 text-pink-200 hover:bg-pink-500/10 hover:text-pink-100",
+            isFocusMode
+              ? "h-7 px-2 text-[10.5px] border-pink-400/25 text-pink-200 hover:bg-pink-500/10 hover:text-pink-100"
+              : "h-8 px-2.5 text-xs border-pink-400/25 text-pink-200 hover:bg-pink-500/10 hover:text-pink-100",
             isPencilDrawMode && "bg-pink-500/16 text-pink-100 border-pink-300/40",
           )}
           title="Pink pencil drawing tool"
@@ -4444,7 +4483,9 @@ export function MetalChart({
           size="sm"
           variant="outline"
           className={cn(
-            "h-8 px-3 text-xs border-violet-400/25 text-violet-200 hover:bg-violet-500/10 hover:text-violet-100",
+            isFocusMode
+              ? "h-7 px-2.5 text-[10.5px] border-violet-400/25 text-violet-200 hover:bg-violet-500/10 hover:text-violet-100"
+              : "h-8 px-3 text-xs border-violet-400/25 text-violet-200 hover:bg-violet-500/10 hover:text-violet-100",
             isDrawLineMode && "bg-violet-500/16 text-violet-100 border-violet-300/40",
           )}
           onClick={handleToggleDrawLineMode}
@@ -4455,7 +4496,9 @@ export function MetalChart({
         <Button
           size="sm"
           variant="outline"
-          className="h-8 px-3 text-xs"
+          className={cn(
+            isFocusMode ? "h-7 px-2.5 text-[10.5px]" : "h-8 px-3 text-xs",
+          )}
           disabled={
             drawnLines.length === 0 &&
             freehandDrawings.length === 0 &&
@@ -4468,7 +4511,13 @@ export function MetalChart({
         </Button>
       </div>
 
-      <div className="absolute inset-x-0 bottom-16 top-28 overflow-hidden">
+      <div
+        className={cn(
+          "absolute inset-x-0 overflow-hidden",
+          chartViewportTopClass,
+          chartViewportBottomClass,
+        )}
+      >
         <div ref={containerRef} className="absolute inset-0 h-full w-full min-h-0" />
         {isResistanceMode ? (
           <div
@@ -5076,7 +5125,7 @@ export function MetalChart({
                         fontWeight="600"
                         textAnchor="middle"
                       >
-                        {getPredictionStatusLine(prediction)}
+                        {getPredictionActionLine(prediction)}
                       </text>
                     ) : (
                       <>

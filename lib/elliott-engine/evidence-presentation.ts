@@ -25,6 +25,23 @@ export function formatValidationStatusLabel(
   }
 }
 
+export function formatValidationStatusShortLabel(
+  validationStatus: ScenarioEvidence["validationStatus"],
+) {
+  switch (validationStatus) {
+    case "valid":
+      return "Valid";
+    case "provisional":
+      return "Provisional";
+    case "weak":
+      return "Weak";
+    case "invalid":
+      return "Invalid";
+    default:
+      return "Pending";
+  }
+}
+
 export function formatSetupQualityLabel(
   setupQuality: ScenarioEvidence["setupQuality"],
 ) {
@@ -76,6 +93,48 @@ export function buildScenarioEvidenceSummary(
   return `${evidenceSummary.passed} pass · ${evidenceSummary.warning} warning · ${evidenceSummary.failed} fail`;
 }
 
+export function buildScenarioEdgeLabel(
+  scenario: Pick<ABCImprovedScenario, "evidence">,
+) {
+  const { validationStatus, setupQuality, higherTimeframeAlignment } =
+    scenario.evidence;
+
+  if (
+    validationStatus === "valid" &&
+    setupQuality === "high" &&
+    higherTimeframeAlignment === "aligned"
+  ) {
+    return "Yes, if confirmed";
+  }
+
+  if (
+    validationStatus === "invalid" ||
+    validationStatus === "weak" ||
+    higherTimeframeAlignment === "not-aligned"
+  ) {
+    return "Not yet";
+  }
+
+  return "Needs more confirmation";
+}
+
+export function buildScenarioRoleLabel(
+  scenario: Pick<ABCImprovedScenario, "scenarioRole">,
+) {
+  switch (scenario.scenarioRole) {
+    case "primary":
+      return "Primary";
+    case "alternate":
+      return "Alternate";
+    case "reserve":
+      return "Reserve";
+    case "sole":
+      return "Only count";
+    default:
+      return "Scenario";
+  }
+}
+
 export function buildTargetLadderRows(
   scenario: Pick<ABCImprovedScenario, "targets">,
 ) {
@@ -101,4 +160,11 @@ export function buildNoTradeSummary(noTradeState: NoTradeState) {
 export function buildNoTradeEvidenceSummary(noTradeState: NoTradeState) {
   const { evidenceSummary } = noTradeState;
   return `${evidenceSummary.passed} pass · ${evidenceSummary.warning} warning · ${evidenceSummary.failed} fail`;
+}
+
+export function buildNoTradeConfirmationSummary(noTradeState: NoTradeState) {
+  return (
+    noTradeState.confirmationNeeded[0]?.detail ??
+    "Await cleaner structure before treating the setup as directional."
+  );
 }
