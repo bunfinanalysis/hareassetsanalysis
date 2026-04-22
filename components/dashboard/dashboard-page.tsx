@@ -14,6 +14,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useMarketPolling } from "@/hooks/use-market-polling";
+import { getMarketFeedPresentation } from "@/lib/market-data/feed-status";
 import { METAL_SYMBOLS, TIMEFRAME_OPTIONS } from "@/lib/market-types";
 import { cn, formatClock, formatCompactNumber, formatPrice } from "@/lib/utils";
 import { useMarketStore } from "@/store/market-store";
@@ -59,6 +60,7 @@ export function DashboardPage() {
     quote && range > 0 ? ((quote.lastPrice - quote.low) / range) * 100 : 0;
   const symbolMeta = METAL_SYMBOLS[selectedSymbol];
   const timeframeLabel = TIMEFRAME_OPTIONS[selectedTimeframe].label;
+  const feed = getMarketFeedPresentation(snapshot);
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden">
@@ -68,7 +70,7 @@ export function DashboardPage() {
         isRefreshing={isRefreshing}
         quote={quote}
         selectedSymbol={selectedSymbol}
-        source={snapshot?.source}
+        snapshot={snapshot}
       />
 
       <main className="relative z-10 mx-auto flex w-full max-w-[1820px] flex-1 flex-col gap-4 px-4 py-4 lg:px-5">
@@ -98,12 +100,12 @@ export function DashboardPage() {
                       Market Dashboard
                     </CardTitle>
                     <CardDescription className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-                      TradingView-style candlesticks with live Yahoo Finance
-                      polling, timeframe controls, and a production-ready shell
-                      for the Elliott Wave tools coming next.
+                      Yahoo-backed candlestick data with explicit feed-state
+                      disclosure, timeframe controls, and a production-ready
+                      shell for the Elliott Wave tools coming next.
                     </CardDescription>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Data from Yahoo Finance
+                      {feed.description}
                     </p>
                   </div>
                 </div>
@@ -114,7 +116,7 @@ export function DashboardPage() {
 
             <CardContent className="flex flex-1 flex-col p-4 pt-4 sm:p-5">
               <MetalChart
-                candles={snapshot?.candles ?? []}
+                market={snapshot}
                 isLoading={isLoading}
                 symbol={selectedSymbol}
                 timeframeLabel={timeframeLabel}
@@ -125,9 +127,9 @@ export function DashboardPage() {
           <div className="space-y-4">
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">Session Structure</CardTitle>
+                    <CardTitle className="text-base">Session Structure</CardTitle>
                 <CardDescription>
-                  Real-time context for the currently selected metal.
+                  Real-time context for the currently selected market.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -168,11 +170,7 @@ export function DashboardPage() {
                 <InfoMetric label="Polling Interval" value="10 seconds" />
                 <InfoMetric
                   label="Historical Candles"
-                  value={
-                    snapshot?.source === "mock"
-                      ? "Fallback modeled"
-                      : "Yahoo Finance OHLC"
-                  }
+                  value={snapshot?.source === "mock" ? "Demo fallback candles" : "Provider-backed OHLC"}
                 />
                 <InfoMetric
                   label="Last Update"
@@ -180,8 +178,25 @@ export function DashboardPage() {
                 />
                 <InfoMetric
                   label="Feed Provider"
-                  value={snapshot?.source === "mock" ? "Fallback Feed" : "Yahoo Finance"}
-                  tone={snapshot?.source === "mock" ? "negative" : "positive"}
+                  value={feed.sourceLabel}
+                  tone={
+                    feed.sourceTone === "positive"
+                      ? "positive"
+                      : feed.sourceTone === "negative"
+                        ? "negative"
+                        : "neutral"
+                  }
+                />
+                <InfoMetric
+                  label="Feed Status"
+                  value={feed.connectionLabel}
+                  tone={
+                    feed.connectionTone === "positive"
+                      ? "positive"
+                      : feed.connectionTone === "negative"
+                        ? "negative"
+                        : "neutral"
+                  }
                 />
               </CardContent>
             </Card>

@@ -1,6 +1,15 @@
-HareAssets is a Next.js trading dashboard for Gold and Silver using Yahoo Finance public chart data.
+HareAssets is a Next.js trading dashboard for metals using Yahoo Finance market data.
+
+## Current Feed Path
+
+- `/api/market` fetches live Yahoo Finance chart data server-side.
+- The chart, quote cards, and Elliott engine all consume the same normalized `MarketSnapshot` object.
+- If the latest Yahoo refresh fails, HareAssets can show the most recent confirmed Yahoo snapshot as cached fallback data.
+- HareAssets does not synthesize fake prices and present them as live data.
 
 ## Getting Started
+
+No API key is required for the current Yahoo Finance path.
 
 Run the development server:
 
@@ -10,7 +19,17 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 
 Open [http://127.0.0.1:3000](http://127.0.0.1:3000) in your browser.
 
-No API key or `.env.local` setup is required.
+## Optional Yahoo Cache Refresh
+
+Refresh the local Yahoo snapshot cache for one symbol/timeframe or for every supported combination:
+
+```bash
+npm run refresh:yahoo
+```
+
+```bash
+npm run refresh:yahoo -- XAGUSD 1H
+```
 
 ## Evaluation Harness
 

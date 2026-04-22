@@ -6,10 +6,11 @@ import { SymbolSwitcher } from "@/components/dashboard/symbol-switcher";
 import { Badge } from "@/components/ui/badge";
 import {
   METAL_SYMBOLS,
-  type MarketDataSource,
+  type MarketSnapshot,
   type MetalSymbolCode,
   type QuoteData,
 } from "@/lib/market-types";
+import { getMarketFeedPresentation } from "@/lib/market-data/feed-status";
 import {
   cn,
   formatClock,
@@ -46,33 +47,22 @@ function TickerMetric({
   );
 }
 
-function getSourceLabel(source?: MarketDataSource) {
-  if (source === "mock") {
-    return "Fallback Feed";
-  }
-
-  if (source === "yahoo-finance") {
-    return "Yahoo Finance";
-  }
-
-  return "Initializing";
-}
-
 type HeaderTickerProps = {
   isRefreshing: boolean;
   quote: QuoteData | null;
   selectedSymbol: MetalSymbolCode;
-  source?: MarketDataSource;
+  snapshot?: Pick<MarketSnapshot, "provider" | "source"> | null;
 };
 
 export function HeaderTicker({
   isRefreshing,
   quote,
   selectedSymbol,
-  source,
+  snapshot,
 }: HeaderTickerProps) {
   const precision = METAL_SYMBOLS[selectedSymbol].precision;
   const isPositive = (quote?.changePercent ?? 0) >= 0;
+  const feed = getMarketFeedPresentation(snapshot);
 
   return (
     <header className="sticky top-0 z-30 border-b border-white/8 bg-[rgba(5,8,18,0.86)] backdrop-blur-xl">
@@ -89,18 +79,29 @@ export function HeaderTicker({
                   HareAssets
                 </h1>
                 <Badge variant="outline" className="border-white/10 text-muted-foreground">
-                  Gold, Silver, Platinum, Copper & Uranium
+                  Gold, Silver, Platinum, Copper, Uranium & S&amp;P500
                 </Badge>
-                <Badge className="bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500/12">
+                <Badge
+                  className={cn(
+                    feed.badgeTone === "positive" &&
+                      "bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500/12",
+                    feed.badgeTone === "warning" &&
+                      "bg-amber-500/12 text-amber-200 hover:bg-amber-500/12",
+                    feed.badgeTone === "negative" &&
+                      "bg-rose-500/12 text-rose-200 hover:bg-rose-500/12",
+                    feed.badgeTone === "neutral" &&
+                      "bg-white/8 text-muted-foreground hover:bg-white/8",
+                  )}
+                >
                   <Activity className="mr-1.5 h-3.5 w-3.5" />
-                  {getSourceLabel(source)}
+                  {feed.badgeLabel}
                 </Badge>
               </div>
               <p className="mt-1 text-sm text-muted-foreground">
-                Real-time Elliott Wave charting workspace for metals.
+                Elliott Wave charting workspace for metals, uranium, and index proxies.
               </p>
               <p className="mt-1 text-xs text-muted-foreground/90">
-                Data from Yahoo Finance
+                {feed.description}
               </p>
             </div>
           </div>
@@ -110,10 +111,18 @@ export function HeaderTicker({
               <span
                 className={cn(
                   "h-2.5 w-2.5 rounded-full",
-                  isRefreshing ? "animate-pulse bg-primary" : "bg-positive",
+                  isRefreshing
+                    ? "animate-pulse bg-primary"
+                    : feed.connectionTone === "positive"
+                      ? "bg-positive"
+                      : feed.connectionTone === "warning"
+                        ? "bg-warning"
+                        : feed.connectionTone === "negative"
+                          ? "bg-negative"
+                          : "bg-muted-foreground",
                 )}
               />
-              {isRefreshing ? "Refreshing" : "Connected"}
+              {isRefreshing ? `Refreshing ${feed.connectionLabel}` : feed.connectionLabel}
             </div>
             <SymbolSwitcher selectedSymbol={selectedSymbol} />
           </div>
@@ -121,7 +130,7 @@ export function HeaderTicker({
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
           <TickerMetric
-            label="Last"
+            label={feed.priceLabel}
             value={quote ? `$${formatPrice(quote.lastPrice, precision)}` : "Loading"}
           />
           <TickerMetric

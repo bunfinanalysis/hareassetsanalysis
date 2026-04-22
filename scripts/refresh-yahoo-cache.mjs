@@ -1,6 +1,9 @@
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const YAHOO_CHART_HOSTS = [
   "query1.finance.yahoo.com",
@@ -10,6 +13,9 @@ const YAHOO_CHART_HOSTS = [
 const SYMBOLS = {
   XAUUSD: "GC=F",
   XAGUSD: "SI=F",
+  XPTUSD: "PL=F",
+  XCUUSD: "HG=F",
+  XURUSD: "URNM",
 };
 
 const TIMEFRAMES = {
@@ -25,33 +31,42 @@ const TIMEFRAMES = {
 
 const CACHE_FILE_PATH = join(process.cwd(), "data", "yahoo-chart-cache.json");
 
-function fetchWithCurl(url, referer) {
-  return new Promise((resolve, reject) => {
-    const command =
-      `curl -sS --max-time 10 '${url}' ` +
-      `-H 'User-Agent: Mozilla/5.0' ` +
-      `-H 'Accept: application/json' ` +
-      `-H 'Accept-Language: en-US,en;q=0.9' ` +
-      `-H 'Origin: https://finance.yahoo.com' ` +
-      `-H 'Referer: ${referer}'`;
+async function fetchWithCurl(url, referer) {
+  const { stdout } = await execFileAsync(
+    "curl",
+    [
+      "-sS",
+      "--max-time",
+      "10",
+      "-w",
+      "\n%{http_code}",
+      "-H",
+      "User-Agent: Mozilla/5.0",
+      "-H",
+      "Accept: application/json",
+      "-H",
+      "Accept-Language: en-US,en;q=0.9",
+      "-H",
+      "Origin: https://finance.yahoo.com",
+      "-H",
+      `Referer: ${referer}`,
+      url,
+    ],
+    {
+      timeout: 10_000,
+      maxBuffer: 8 * 1024 * 1024,
+    },
+  );
 
-    exec(
-      command,
-      { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
-      (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+  const splitIndex = stdout.lastIndexOf("\n");
+  const payload = splitIndex === -1 ? stdout : stdout.slice(0, splitIndex);
+  const statusCode = Number(splitIndex === -1 ? "0" : stdout.slice(splitIndex + 1).trim());
 
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (parseError) {
-          reject(parseError);
-        }
-      },
-    );
-  });
+  if (!Number.isFinite(statusCode) || statusCode >= 400) {
+    throw new Error(`Yahoo Finance request failed with ${Number.isFinite(statusCode) ? statusCode : "unknown"}`);
+  }
+
+  return JSON.parse(payload);
 }
 
 async function fetchChartResult(symbol, timeframe) {

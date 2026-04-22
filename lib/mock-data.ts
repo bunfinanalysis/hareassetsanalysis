@@ -1,13 +1,15 @@
 import {
+  createMarketProviderState,
   METAL_SYMBOLS,
   TIMEFRAME_OPTIONS,
   type Candle,
   type MarketDataSource,
+  type MarketProviderState,
   type MarketSnapshot,
   type MetalSymbolCode,
   type QuoteData,
   type Timeframe,
-} from "@/lib/market-types";
+} from "./market-types.ts";
 
 function createSeededRandom(seed: number) {
   let current = seed;
@@ -60,6 +62,14 @@ function getMockMarketProfile(symbol: MetalSymbolCode) {
       volatilityUnit: 0.44,
       trendBias: 0.04,
       baseVolume: 9400,
+    };
+  }
+
+  if (symbol === "SPXUSD") {
+    return {
+      volatilityUnit: 34,
+      trendBias: 0.09,
+      baseVolume: 2840000,
     };
   }
 
@@ -166,9 +176,13 @@ export function buildQuoteFromCandles(
 export function buildMockSnapshot(
   symbol: MetalSymbolCode,
   timeframe: Timeframe,
-  source: MarketDataSource = "mock",
-  warning?: string,
+  options: {
+    source?: MarketDataSource;
+    warning?: string;
+    provider?: Omit<MarketProviderState, "id" | "isLive">;
+  } = {},
 ): MarketSnapshot {
+  const source = options.source ?? "mock";
   const candles = generateMockCandles({ symbol, timeframe });
 
   return {
@@ -177,6 +191,16 @@ export function buildMockSnapshot(
     candles,
     quote: buildQuoteFromCandles(symbol, candles, source),
     source,
-    warning,
+    provider: createMarketProviderState(
+      options.provider ?? {
+        status: source === "mock" ? "fallback" : "live",
+        configured: source !== "mock",
+        message:
+          source === "mock"
+            ? "Live market data is unavailable. HareAssets is showing demo fallback data."
+            : "Live market data is active.",
+      },
+    ),
+    warning: options.warning,
   };
 }

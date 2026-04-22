@@ -55,6 +55,8 @@ import {
   type WaveTrend,
   type WaveValidationResult,
 } from "@/lib/elliottWaveUtils";
+import { getMarketFeedPresentation } from "@/lib/market-data/feed-status";
+import type { MarketSnapshot } from "@/lib/market-types";
 import { cn, formatPrice } from "@/lib/utils";
 
 type TabKey = "analysis" | "fibonacci" | "projection";
@@ -80,6 +82,7 @@ export type WaveAnalysisPanelProps = {
   className?: string;
   pricePrecision?: number;
   symbolLabel?: string;
+  snapshot?: Pick<MarketSnapshot, "provider" | "source"> | null;
 };
 
 type ProjectionTarget = {
@@ -383,7 +386,9 @@ export function WaveAnalysisPanel({
   className,
   pricePrecision = 2,
   symbolLabel = "Active Market",
+  snapshot,
 }: WaveAnalysisPanelProps) {
+  const feed = getMarketFeedPresentation(snapshot);
   const [activeTab, setActiveTab] = useState<TabKey>("analysis");
   const [useAlternateCount, setUseAlternateCount] = useState(false);
 
@@ -1568,7 +1573,8 @@ export function WaveAnalysisPanel({
             )}
           </div>
           <p className="mt-3 text-xs leading-5 text-muted-foreground">
-            Data from Yahoo Finance. Wave overlays, reaction zones, and validation are computed locally inside HareAssets.
+            {feed.description} Wave overlays, reaction zones, and validation are
+            computed locally inside HareAssets.
           </p>
         </div>
       </CardContent>

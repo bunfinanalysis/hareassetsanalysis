@@ -9,7 +9,6 @@ import {
   TickMarkType,
   createChart,
   type AutoscaleInfo,
-  type CandlestickData,
   type IChartApi,
   type ISeriesApi,
   type MouseEventParams,
@@ -21,6 +20,7 @@ import { Pencil } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { toLightweightCandlestickData } from "@/lib/charting/lightweight-chart-adapter";
 import {
   autoDetectWaveCount,
   buildWaveCount,
@@ -60,10 +60,15 @@ import {
 } from "@/lib/elliott-engine/overlay-presentation";
 import type { NoTradeState } from "@/lib/elliott-engine/types";
 import { cn } from "@/lib/utils";
-import { METAL_SYMBOLS, type Candle, type MetalSymbolCode } from "@/lib/market-types";
+import {
+  METAL_SYMBOLS,
+  type Candle,
+  type MarketSnapshot,
+  type MetalSymbolCode,
+} from "@/lib/market-types";
 
 type MetalChartProps = {
-  candles: Candle[];
+  market: MarketSnapshot | null;
   isLoading: boolean;
   isFocusMode?: boolean;
   symbol: MetalSymbolCode;
@@ -2150,6 +2155,15 @@ function applyPreferredTimeScaleWindow(
   chart.timeScale().setVisibleLogicalRange({ from, to });
 }
 
+function resetChartViewportForMarketChange(
+  chart: IChartApi,
+  candleCount: number,
+  timeframeLabel: string,
+) {
+  chart.priceScale("right").setAutoScale(true);
+  applyPreferredTimeScaleWindow(chart, candleCount, timeframeLabel);
+}
+
 function buildAutoDetectedWavePoints(detection: ReturnType<typeof autoDetectWaveCount>) {
   const primaryCount =
     detection.count ?? detection.correctiveCount ?? detection.impulseCount ?? null;
@@ -2219,7 +2233,7 @@ function pickCompanionDetectedCandidate(
 }
 
 export function MetalChart({
-  candles,
+  market,
   isLoading,
   isFocusMode = false,
   symbol,
@@ -2231,6 +2245,7 @@ export function MetalChart({
   onWaveAnalysisChange,
   onAlternateCountChange,
 }: MetalChartProps) {
+  const candles = useMemo(() => market?.candles ?? [], [market]);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
@@ -3394,17 +3409,18 @@ export function MetalChart({
   }, [handleChartClickProxy]);
 
   useEffect(() => {
-    if (!candleSeriesRef.current || candles.length === 0) {
+    if (!candleSeriesRef.current) {
       return;
     }
 
-    const candleData: CandlestickData<Time>[] = candles.map((candle) => ({
-      time: candle.time as UTCTimestamp,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-    }));
+    if (candles.length === 0) {
+      candleSeriesRef.current.setData([]);
+      setOverlayGeometry(EMPTY_OVERLAY);
+      overlayFingerprintRef.current = "";
+      return;
+    }
+
+    const candleData = toLightweightCandlestickData(candles);
 
     chartRef.current?.applyOptions({
       localization: getChartLocalization(symbol),
@@ -3420,7 +3436,11 @@ export function MetalChart({
 
     if (lastResetKeyRef.current !== resetKey) {
       if (chartRef.current) {
-        applyPreferredTimeScaleWindow(chartRef.current, candleData.length, timeframeLabel);
+        resetChartViewportForMarketChange(
+          chartRef.current,
+          candleData.length,
+          timeframeLabel,
+        );
       }
       setAutoABCDetection(null);
       lastResetKeyRef.current = resetKey;

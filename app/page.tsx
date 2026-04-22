@@ -17,6 +17,7 @@ import {
   type MetalChartInteractionMode,
   type MetalChartWaveAnalysis,
 } from "@/components/charts/metal-chart";
+import { DisclaimerModal } from "@/components/dashboard/disclaimer-modal";
 import { FocusModeContextBar } from "@/components/dashboard/focus-mode-context-bar";
 import { FocusModeRailDrawer } from "@/components/dashboard/focus-mode-rail-drawer";
 import { HeaderTicker } from "@/components/dashboard/header-ticker";
@@ -25,19 +26,18 @@ import { TimeframeSwitcher } from "@/components/dashboard/timeframe-switcher";
 import { WaveAnalysisPanel } from "@/components/WaveAnalysisPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useMarketPolling } from "@/hooks/use-market-polling";
 import { buildAnalysisRailSections } from "@/lib/elliott-engine/analysis-rail-presentation";
 import {
   buildFocusModeViewModel,
   getFocusModeShortcutAction,
 } from "@/lib/elliott-engine/focus-mode-presentation";
+import { getMarketFeedPresentation } from "@/lib/market-data/feed-status";
+import {
+  persistDisclaimerAcceptance,
+  resolveDisclaimerAcceptance,
+} from "@/lib/disclaimer";
 import { buildWaveReactionAnalysis } from "@/lib/elliottReactionEngine";
 import {
   type WaveCount,
@@ -81,7 +81,7 @@ function AccessGate({
             </div>
           </div>
           <CardDescription className="mt-4 text-sm leading-7 text-muted-foreground">
-            Hello there! Unfortunetly this website is currently under construction.
+            Hello there! Unfortunately this website is currently under construction.
             If you are a developer, please type the code below to access the site.
           </CardDescription>
         </CardHeader>
@@ -152,6 +152,7 @@ function DashboardContent() {
   const sessionPosition =
     quote && range > 0 ? ((quote.lastPrice - quote.low) / range) * 100 : 0;
   const isPositive = (quote?.changePercent ?? 0) >= 0;
+  const feed = getMarketFeedPresentation(snapshot);
 
   const clearWaveWorkspace = useCallback(() => {
     setWavePoints([]);
@@ -265,7 +266,7 @@ function DashboardContent() {
           isRefreshing={isRefreshing}
           quote={quote}
           selectedSymbol={selectedSymbol}
-          source={snapshot?.source}
+          snapshot={snapshot}
         />
       ) : null}
 
@@ -319,12 +320,28 @@ function DashboardContent() {
                     <div className="rounded-[14px] border border-white/8 bg-white/4 px-1.5 py-0.5">
                       <TimeframeSwitcher />
                     </div>
-                    <div className="rounded-full border border-white/8 bg-white/4 px-2 py-1 text-[11px] text-muted-foreground">
-                      <Radar className="mr-1 inline h-3.25 w-3.25 text-emerald-300" />
-                      {snapshot?.source === "mock" ? "Fallback" : "Yahoo"}
+                    <div
+                      className={cn(
+                        "rounded-full border border-white/8 bg-white/4 px-2 py-1 text-[11px]",
+                        feed.badgeTone === "positive" && "text-emerald-200",
+                        feed.badgeTone === "warning" && "text-amber-200",
+                        feed.badgeTone === "negative" && "text-rose-200",
+                        feed.badgeTone === "neutral" && "text-muted-foreground",
+                      )}
+                    >
+                      <Radar
+                        className={cn(
+                          "mr-1 inline h-3.25 w-3.25",
+                          feed.badgeTone === "positive" && "text-emerald-300",
+                          feed.badgeTone === "warning" && "text-amber-300",
+                          feed.badgeTone === "negative" && "text-rose-300",
+                          feed.badgeTone === "neutral" && "text-muted-foreground",
+                        )}
+                      />
+                      {feed.badgeLabel}
                     </div>
                     <div className="rounded-full border border-white/8 bg-white/4 px-2 py-1 text-[11px] text-muted-foreground">
-                      Live:{" "}
+                      {feed.priceLabel}:{" "}
                       <span
                         className={cn(
                           "font-semibold",
@@ -383,7 +400,7 @@ function DashboardContent() {
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge className="bg-primary/12 text-primary hover:bg-primary/12">
                         <CandlestickChart className="mr-1.5 h-3.5 w-3.5" />
-                        Live Workspace
+                        Market Workspace
                       </Badge>
                       <Badge
                         variant="outline"
@@ -397,9 +414,20 @@ function DashboardContent() {
                       >
                         {timeframeLabel}
                       </Badge>
-                      <Badge className="bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500/12">
+                      <Badge
+                        className={cn(
+                          feed.badgeTone === "positive" &&
+                            "bg-emerald-500/12 text-emerald-300 hover:bg-emerald-500/12",
+                          feed.badgeTone === "warning" &&
+                            "bg-amber-500/12 text-amber-200 hover:bg-amber-500/12",
+                          feed.badgeTone === "negative" &&
+                            "bg-rose-500/12 text-rose-200 hover:bg-rose-500/12",
+                          feed.badgeTone === "neutral" &&
+                            "bg-white/8 text-muted-foreground hover:bg-white/8",
+                        )}
+                      >
                         <Radar className="mr-1.5 h-3.5 w-3.5" />
-                        {snapshot?.source === "mock" ? "Fallback Feed" : "Yahoo Finance"}
+                        {feed.badgeLabel}
                       </Badge>
                     </div>
 
@@ -408,16 +436,19 @@ function DashboardContent() {
                         Elliott Wave Dashboard
                       </CardTitle>
                       <CardDescription className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-                        Real-time Gold, Silver, Platinum, Copper, and Uranium
-                        charting with manual wave placement, auto-detect
-                        scaffolding, live Fibonacci overlays, and a dedicated
-                        analysis rail.
+                        Gold, Silver, Platinum, Copper, Uranium, and S&amp;P500
+                        charting with explicit feed-state disclosure, manual
+                        wave placement, auto-detect scaffolding, live-ready
+                        Fibonacci overlays, and a dedicated analysis rail.
                       </CardDescription>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        {feed.description}
+                      </p>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
                       <div className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-xs text-muted-foreground">
-                        Live:{" "}
+                        {feed.priceLabel}:{" "}
                         <span
                           className={cn(
                             "font-semibold",
@@ -505,7 +536,7 @@ function DashboardContent() {
               ) : null}
 
               <MetalChart
-                candles={snapshot?.candles ?? []}
+                market={snapshot}
                 isLoading={isLoading}
                 isFocusMode={isFocusMode}
                 symbol={selectedSymbol}
@@ -532,6 +563,7 @@ function DashboardContent() {
               alternateValidation={alternateValidation}
               onClearWaves={clearWaveWorkspace}
               pricePrecision={symbolMeta.precision}
+              snapshot={snapshot}
               symbolLabel={`${symbolMeta.label} · ${timeframeLabel}`}
             />
           ) : null}
@@ -551,6 +583,7 @@ function DashboardContent() {
               alternateValidation={alternateValidation}
               onClearWaves={clearWaveWorkspace}
               pricePrecision={symbolMeta.precision}
+              snapshot={snapshot}
               symbolLabel={`${symbolMeta.label} · ${timeframeLabel}`}
             />
           </FocusModeRailDrawer>
@@ -569,14 +602,16 @@ function DashboardContent() {
 export default function Home() {
   const [accessCode, setAccessCode] = useState("");
   const [accessError, setAccessError] = useState<string | null>(null);
-  const [hasAccess, setHasAccess] = useState(false);
-  const [isCheckingAccess, setIsCheckingAccess] = useState(true);
+  const [hasAccess, setHasAccess] = useState<boolean | null>(null);
+  const [isDisclaimerAccepted, setIsDisclaimerAccepted] = useState<boolean | null>(null);
 
   useEffect(() => {
     try {
       setHasAccess(window.localStorage.getItem(ACCESS_STORAGE_KEY) === ACCESS_CODE);
-    } finally {
-      setIsCheckingAccess(false);
+      setIsDisclaimerAccepted(resolveDisclaimerAcceptance(window.localStorage));
+    } catch {
+      setHasAccess(false);
+      setIsDisclaimerAccepted(false);
     }
   }, []);
 
@@ -600,7 +635,15 @@ export default function Home() {
     [accessCode],
   );
 
-  if (isCheckingAccess) {
+  const handleAcknowledgeDisclaimer = useCallback(() => {
+    try {
+      persistDisclaimerAcceptance(window.localStorage);
+    } catch {}
+
+    setIsDisclaimerAccepted(true);
+  }, []);
+
+  if (hasAccess === null || isDisclaimerAccepted === null) {
     return (
       <div className="flex min-h-screen items-center justify-center px-4">
         <div className="rounded-2xl border border-white/8 bg-white/4 px-5 py-4 text-sm text-muted-foreground">
@@ -624,6 +667,10 @@ export default function Home() {
         onSubmit={handleSubmit}
       />
     );
+  }
+
+  if (!isDisclaimerAccepted) {
+    return <DisclaimerModal onAcknowledge={handleAcknowledgeDisclaimer} />;
   }
 
   return <DashboardContent />;
